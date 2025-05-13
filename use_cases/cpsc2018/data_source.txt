@@ -1,0 +1,65 @@
+Dataset: CPSC2018 (China Physiological Signal Challenge)
+
+Overview:
+The CPSC2018 dataset consists of 6,877 12-lead ECG recordings collected from 11 hospitals in China. Each recording lasts between 6 to 60 seconds and is sampled at 500 Hz. It includes one normal sinus rhythm (NSR) class and eight abnormal rhythm types.
+
+Signal Format:
+- Each signal is a 2D array of shape (length, 12), where 12 denotes the ECG leads.
+- Labels are annotated in the corresponding .hea header files using SNOMED-CT codes.
+
+Preprocessing:
+- Signals shorter than 5,000 timesteps are discarded.
+- Only recordings with known diagnostic SNOMED codes among the target 9 categories are retained.
+- Signals are standardized (z-score normalization).
+- Each sample is trimmed or padded to exactly 5,000 timesteps (10 seconds).
+- Class labels are mapped using the following SNOMED-to-name dictionary:
+
+  426783006 → NSR
+  270492004 → I-AVB
+  164889003 → AF
+  164909002 → LBBB
+  59118001  → RBBB
+  284470004 → PAC
+  164884008 → PVC
+  429622005 → STD
+  164931005 → STE
+
+Incremental Class Split:
+The dataset is used for class-incremental continual learning (CIL). The classes are incrementally introduced across four periods as follows:
+
+Period 1:
+  - Class 0: NSR
+  - Class 1: OTHER (any abnormal type not yet defined as individual class)
+
+Period 2:
+  - Class 2: I-AVB
+  - Class 3: AF
+  - Class 1: still used for remaining abnormalities
+
+Period 3:
+  - Class 4: LBBB
+  - Class 5: RBBB
+  - Class 1: still used for remaining abnormalities
+
+Period 4:
+  - Class 6: PAC
+  - Class 7: PVC
+  - Class 8: STD
+  - Class 9: STE
+  - Class 1 (OTHER) is no longer used
+
+Balancing Strategy:
+In Periods 1–3, class 1 (OTHER) often contains more samples than other classes. To avoid class imbalance, the number of OTHER samples is capped to the maximum sample count among the specific classes for that period using random sampling.
+
+Final Dataset Format:
+For each period, the following NumPy arrays are saved:
+  - X_train_p{n}.npy: shape = (N_train, 5000, 12)
+  - y_train_p{n}.npy: shape = (N_train,)
+  - X_test_p{n}.npy:  shape = (N_test, 5000, 12)
+  - y_test_p{n}.npy:  shape = (N_test,)
+
+The dataset is saved under:
+  ./processed/X_train_p{period}.npy
+  ./processed/y_train_p{period}.npy
+  ./processed/X_test_p{period}.npy
+  ./processed/y_test_p{period}.npy

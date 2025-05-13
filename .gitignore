@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.ipynb_checkpoints
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# VSCode
+.vscode/
+
+# System
+.DS_Store
+
+# Output
+*.pth
+*.pkl
+*.npy
+
+# Ignore datasets
+*.csv
+*.tsv
+*.xls
+*.xlsx
+*.zip
+*.tar.gz
+*.tar

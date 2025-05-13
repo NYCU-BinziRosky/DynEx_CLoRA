@@ -1,0 +1,58 @@
+Dataset: Human Activity Recognition Using Smartphones (UCI-HAR)
+
+Overview:
+This dataset contains sensor readings collected from smartphones worn on the waist by 30 volunteers while performing six daily activities. Each activity segment is represented as a 561-dimensional feature vector, which is derived from tri-axial linear acceleration and angular velocity signals. The sampling rate is 50 Hz.
+
+Activities included:
+1 - WALKING
+2 - WALKING_UPSTAIRS
+3 - WALKING_DOWNSTAIRS
+4 - SITTING
+5 - STANDING
+6 - LAYING
+
+Feature Format:
+- X: shape = (N, 561), where N is the number of samples.
+- y: shape = (N,), containing integer labels (1~6 from original dataset).
+- Features and labels are provided as text files in separate train/test directories.
+
+Continual Learning Setup:
+To simulate evolving semantic concepts in a class-incremental learning setting, the activity classes are introduced progressively across four training periods as follows:
+
+Period 1:
+  - Class 0: SITTING
+  - Class 1: STANDING
+
+Period 2:
+  - Class 2: WALKING (merged from original classes WALKING, WALKING_UPSTAIRS, WALKING_DOWNSTAIRS)
+
+Period 3:
+  - Class 3: LAYING
+
+Period 4:
+  - Class 2: WALKING
+  - Class 4: WALKING_UPSTAIRS
+  - Class 5: WALKING_DOWNSTAIRS
+  (WALKING variants are now split into separate classes, introducing semantic drift)
+
+Label Mapping:
+All labels are remapped to a consistent six-class indexing across all periods:
+  - 0 → SITTING
+  - 1 → STANDING
+  - 2 → WALKING
+  - 3 → LAYING
+  - 4 → WALKING_UPSTAIRS
+  - 5 → WALKING_DOWNSTAIRS
+
+For Periods 1–3, all walking-related labels are grouped under WALKING (label 2). In Period 4, these are separated into three distinct labels (2, 4, 5) to simulate label refinement.
+
+Usage:
+The train/test data can be filtered based on the target classes for each period, with labels remapped accordingly. The resulting data for each period should be used to train and evaluate continual learning models under increasing task complexity and evolving label semantics.
+
+Final Input Format:
+- X_train: shape = (N_train, 561)
+- y_train: shape = (N_train,)
+- X_val:   shape = (N_val, 561)
+- y_val:   shape = (N_val,)
+
+Data can be preprocessed and saved according to user preferences for later use in model training.

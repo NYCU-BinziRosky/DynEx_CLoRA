@@ -1,0 +1,74 @@
+Dataset: Bitcoin (BTC-USD) Minute-Level Price Data
+
+Overview:
+This dataset contains historical 1-minute interval trading data of Bitcoin (BTC-USD), spanning multiple years. It includes open, high, low, close prices, volume, and a series of technical indicators. The data is used to classify market trends under a class-incremental learning (CIL) scenario that simulates evolving trend definitions (i.e., semantic drift).
+
+Feature Format:
+- X: shape = (N, 1000, F), where F is the number of selected features after filtering.
+- y: shape = (N, 1000), corresponding to one trend label per timestep in each sequence.
+
+Preprocessing Pipeline:
+1. **Load CSV File**: Read data indexed by timestamp (`date`) with technical indicators already included.
+2. **Downsampling**: Optionally reduce frequency (e.g., to 5-min intervals) by retaining every nth row.
+3. **Gaussian Smoothing**: Apply smoothing to all numeric columns to reduce noise.
+4. **Log Return Calculation**: Compute log returns on selected price/indicator columns, excluding volatile or weakly correlated features.
+5. **Trend Detection**:
+   - Use a custom multi-phase detection algorithm to label each point with a market trend category.
+   - Trends are assigned based on the cumulative product of (1 + log return) and reversal stability.
+   - Trend classes:
+     - 0: No trend
+     - 1: Moderate negative trend
+     - 2: Very strong negative trend
+     - 3: Moderate positive trend
+     - 4: Very strong positive trend
+6. **Sequence Construction**:
+   - Generate fixed-length sequences (e.g., 1000 timesteps) using a sliding window.
+   - Each sequence retains full timestamp order and includes feature values and trend labels.
+
+Continual Learning Setup:
+To simulate an evolving understanding of market dynamics, the training data is split across four periods as follows:
+
+Period 1:
+  - Class 0: No trend
+  - Class 1: Moderate negative trend
+
+Period 2:
+  - Class 2: Very strong negative trend (added)
+
+Period 3:
+  - Class 3: Moderate positive trend (added)
+
+Period 4:
+  - Class 4: Very strong positive trend (added)
+
+Each period's training file corresponds to a different time segment (approx. 190 days), and only the relevant trend labels are retained during training (e.g., {0, 1, 2} in Period 2). Labels not included in `trends_to_keep` are reset to class 0 (No trend) to simulate coarse-to-fine evolution.
+
+Feature Selection:
+Only strongly correlated features are retained for trend detection. Example features:
+- Selected: ['close', 'open', 'SMA_5', 'high', 'low', 'EMA_10', 'SMA_10']
+- Excluded: ['MACD', 'RSI_14', 'volume', 'BBW', 'ATR_14', etc.]
+
+Data Split:
+Each period's sequences are split into:
+- Training: 80%
+- Validation: 10%
+- Testing: 10%
+
+Final Input Format per period:
+- X_train: (N_train, 1000, F)
+- y_train: (N_train, 1000)
+- X_val: (N_val, 1000, F)
+- y_val: (N_val, 1000)
+- X_test: (N_test, 1000, F)
+- y_test: (N_test, 1000)
+
+Usage:
+Call a unified preprocessing function (`process_and_return_splits`) to process each period’s CSV file. Adjust the following parameters as needed:
+- downsampled_data_minutes
+- lower_threshold, upper_threshold (trend strength)
+- reverse_steps (reversal confirmation steps)
+- sequence_length, sliding_interval
+- trends_to_keep
+
+Important:
+Each period corresponds to a distinct CSV file representing a fixed time window (e.g., Period 2 ≈ 2020-11 to 2021-05). Users should adjust file paths and trend filters accordingly.
