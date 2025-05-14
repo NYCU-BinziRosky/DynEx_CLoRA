@@ -1,7 +1,3 @@
-# ================================
-# 📦 Imports
-# ================================
-
 # OS & file management
 import os
 import shutil
@@ -25,19 +21,13 @@ from scipy.ndimage import gaussian_filter1d
 from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
 
-# ================================
-# 📁 Paths & Constants (user-defined)
-# ================================
-
 # Update this to your project root
-BASE_DIR = "./CPSC_CIL"
+BASE_DIR = "./cpsc2018"
 save_dir = os.path.join(BASE_DIR, "processed")  # Path to the preprocessed `.npy` files (one for each continual learning period).
 ECG_PATH = os.path.join(BASE_DIR, "datas")      # Directory containing original `.mat` and `.hea` files.
 MAX_LEN = 5000  # ECG signal sequence length
 
-# ================================
-# 🔤 SNOMED code mapping
-# ================================
+# NOMED code mapping
 snomed_map = {
     "426783006": "NSR",
     "270492004": "I-AVB",
@@ -58,9 +48,7 @@ period_label_map = {
     4: {"NSR": 0, "I-AVB": 2, "AF": 3, "LBBB": 4, "RBBB": 5, "PAC": 6, "PVC": 7, "STD": 8, "STE": 9}
 }
 
-# ================================
-# 📊 Class Distribution Utility
-# ================================
+# Utility Function
 def print_class_distribution(y, label_map):
     y = np.array(y).flatten()
     total = len(y)
@@ -72,16 +60,10 @@ def print_class_distribution(y, label_map):
         name = label[0] if label else str(lbl)
         print(f"  - Label {lbl:<2} ({name:<10}) → {count:>5} samples ({(count/total)*100:5.2f}%)")
 
-# ================================
-# 📂 Folder Utility
-# ================================
 def ensure_folder(folder_path: str) -> None:
     """Create a folder if it does not exist."""
     os.makedirs(folder_path, exist_ok=True)
 
-# ================================
-# ⚡ GPU Device Selector
-# ================================
 def auto_select_cuda_device(verbose=True):
     """Automatically select the least-used CUDA device, or fallback to CPU."""
     if not torch.cuda.is_available():
@@ -104,9 +86,6 @@ def auto_select_cuda_device(verbose=True):
             print(f"⚠️ GPU detection failed. Falling back to cuda:0 ({e})")
         return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# ================================
-# 📈 Class-wise Accuracy Utility
-# ================================
 def compute_classwise_accuracy(student_logits_flat, y_batch, class_correct, class_total):
     """Compute per-class accuracy."""
     if student_logits_flat.device != y_batch.device:
@@ -125,17 +104,12 @@ def compute_classwise_accuracy(student_logits_flat, y_batch, class_correct, clas
         class_total[label] += label_mask.sum().item()
         class_correct[label] += (label_mask & correct_mask).sum().item()
 
-# ================================
-# 📊 Model Parameter Info
-# ================================
 def get_model_parameter_info(model):
+    """Return total parameter count and size in MB for the given model."""
     total_params = sum(p.numel() for p in model.parameters())
     param_size_MB = total_params * 4 / (1024**2)
     return total_params, param_size_MB
 
-# ================================
-# ⚖️ Class Weights Calculator
-# ================================
 def compute_class_weights(y: np.ndarray, num_classes: int, exclude_classes: list = None) -> torch.Tensor:
     """Compute inverse-frequency class weights with optional exclusions."""
     exclude_classes = set(exclude_classes or [])
@@ -161,9 +135,6 @@ def compute_class_weights(y: np.ndarray, num_classes: int, exclude_classes: list
 
     return torch.tensor(weights, dtype=torch.float32)
 
-# ================================
-# 🔁 Forward Transfer Evaluation
-# ================================
 def compute_fwt_ecg(previous_model, init_model, X_val, y_val, known_classes, batch_size=64):
     """
     Compute Forward Transfer (FWT) score on ECG classification task.
@@ -215,14 +186,11 @@ def compute_fwt_ecg(previous_model, init_model, X_val, y_val, known_classes, bat
     print(f"🔍 Accuracy (prev): {acc_prev:.2f}% | Accuracy (init): {acc_init:.2f}% | FWT: {fwt:.2f}%")
     return fwt, acc_prev, acc_init
 
-# ================================
-# 🧠 LoRA-Enhanced ResNet18_1D for ECG Input
-# ================================
-
+# Model
 class LoRAConv1d(nn.Module):
     """LoRA adapter for Conv1d layer (adds low-rank delta weights)."""
     def __init__(self, conv_layer: nn.Conv1d, rank: int):
-        super(LoRAConv1d, self).__init__()
+        super().__init__()
         self.conv = conv_layer
         self.rank = rank
         self.lora_A = nn.Parameter(torch.zeros(conv_layer.out_channels, rank))
@@ -231,7 +199,7 @@ class LoRAConv1d(nn.Module):
         nn.init.zeros_(self.lora_B)
 
     def forward(self, x):
-        return self.conv(x)  # No override here, only delta is computed
+        return self.conv(x)
 
     def get_delta(self):
         lora_weight = torch.matmul(self.lora_A, self.lora_B).view(
@@ -246,12 +214,12 @@ class LoRAConv1d(nn.Module):
 class BasicBlock1d_LoRA(nn.Module):
     """1D Residual block with optional multiple LoRA adapters on conv2."""
     expansion = 1
+
     def __init__(self, inplanes, planes, stride=1, downsample=None, lora_rank=None):
-        super(BasicBlock1d_LoRA, self).__init__()
+        super().__init__()
         self.conv1 = nn.Conv1d(inplanes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
         self.bn1 = nn.BatchNorm1d(planes)
         self.relu = nn.ReLU(inplace=True)
-
         self.conv2 = nn.Conv1d(planes, planes, kernel_size=3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm1d(planes)
         self.downsample = downsample
@@ -259,16 +227,14 @@ class BasicBlock1d_LoRA(nn.Module):
         self.lora_adapters = nn.ModuleList()
 
     def add_lora_adapter(self):
-        """Add a new LoRA adapter group to conv2."""
+        """Attach a new LoRA adapter to conv2."""
         new_lora = LoRAConv1d(self.conv2, self.lora_rank).to(next(self.parameters()).device)
         self.lora_adapters.append(new_lora)
         return new_lora
 
     def forward(self, x):
         identity = x
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
+        out = self.relu(self.bn1(self.conv1(x)))
 
         if len(self.lora_adapters) > 0:
             base_out = self.conv2(out)
@@ -281,11 +247,9 @@ class BasicBlock1d_LoRA(nn.Module):
             out = self.conv2(out)
 
         out = self.bn2(out)
-        if self.downsample is not None:
+        if self.downsample:
             identity = self.downsample(x)
-        out += identity
-        out = self.relu(out)
-        return out
+        return self.relu(out + identity)
 
 
 class ResNet18_1D_LoRA(nn.Module):
@@ -294,23 +258,20 @@ class ResNet18_1D_LoRA(nn.Module):
     Supports dynamic addition of adapters for continual learning.
     """
     def __init__(self, input_channels=12, output_size=9, inplanes=64, lora_rank=4):
-        super(ResNet18_1D_LoRA, self).__init__()
+        super().__init__()
         self.inplanes = inplanes
         self.lora_rank = lora_rank
 
-        # Initial convolution block
         self.conv1 = nn.Conv1d(input_channels, inplanes, kernel_size=15, stride=2, padding=7, bias=False)
         self.bn1 = nn.BatchNorm1d(inplanes)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
 
-        # Residual layers with LoRA support
         self.layer1 = self._make_layer(BasicBlock1d_LoRA, 64, 2)
         self.layer2 = self._make_layer(BasicBlock1d_LoRA, 128, 2, stride=2)
         self.layer3 = self._make_layer(BasicBlock1d_LoRA, 256, 2, stride=2)
         self.layer4 = self._make_layer(BasicBlock1d_LoRA, 512, 2, stride=2)
 
-        # Pooling and classifier
         self.adaptiveavgpool = nn.AdaptiveAvgPool1d(1)
         self.adaptivemaxpool = nn.AdaptiveMaxPool1d(1)
         self.dropout = nn.Dropout(0.2)
@@ -349,40 +310,36 @@ class ResNet18_1D_LoRA(nn.Module):
         return self.fc(x)
 
     def init_weights(self):
+        """Kaiming initialization for Conv1d, Linear, and BatchNorm layers."""
         for m in self.modules():
-            if isinstance(m, (nn.Linear, nn.Conv1d)):
+            if isinstance(m, (nn.Conv1d, nn.Linear)):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
             elif isinstance(m, nn.BatchNorm1d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
     def add_lora_adapter(self):
-        """Add a LoRA adapter group to all BasicBlocks."""
-        lora_count = 0
-        added = []
+        """Attach a LoRA adapter to each BasicBlock in the network."""
+        adapters = []
         for module in self.modules():
             if isinstance(module, BasicBlock1d_LoRA):
-                added.append(module.add_lora_adapter())
-                lora_count += 1
-        print(f"✅ Added new LoRA adapters to {lora_count} BasicBlocks")
-        return added
+                adapters.append(module.add_lora_adapter())
+        return adapters
 
     def count_lora_adapters(self):
-        total = 0
-        blocks_with_lora = 0
+        """Return total number of LoRA adapters and blocks that contain them."""
+        total, blocks_with_adapters = 0, 0
         for module in self.modules():
-            if isinstance(module, BasicBlock1d_LoRA):
-                if len(module.lora_adapters) > 0:
-                    blocks_with_lora += 1
-                    total += len(module.lora_adapters)
-        print(f"📈 LoRA Adapter Statistics:")
-        print(f"  - Total LoRA adapters: {total}")
-        print(f"  - BasicBlocks with adapters: {blocks_with_lora}")
+            if isinstance(module, BasicBlock1d_LoRA) and module.lora_adapters:
+                blocks_with_adapters += 1
+                total += len(module.lora_adapters)
         return total
 
     def count_lora_groups(self):
+        """Return number of LoRA adapter groups (per-block adapter count)."""
         blocks = [m for m in self.modules() if isinstance(m, BasicBlock1d_LoRA)]
         return len(blocks[0].lora_adapters) if blocks else 0
+
 
 
 def extract_features(model, x):

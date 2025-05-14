@@ -69,48 +69,67 @@ class EWC:
 
 def train_with_ewc(model, dataloader, val_loader, optimizer, criterion,
                    ewc=None, lambda_ewc=0.4, scheduler=None,
-                   device='cuda', num_epochs=100, save_path=None):
+                   device='cuda', num_epochs=100, model_saving_folder=None):
     """
-    Task-agnostic training loop with optional EWC penalty.
+    Generic training loop with optional EWC regularization.
+    
+    Arguments:
+        model (nn.Module): Target model for training.
+        dataloader (DataLoader): Training data.
+        val_loader (DataLoader): Validation data.
+        optimizer (Optimizer): Optimizer instance.
+        criterion (Loss): Loss function.
+        ewc (EWC, optional): EWC object containing Fisher info and reference parameters.
+        lambda_ewc (float): Scaling factor for EWC loss.
+        scheduler (optional): Learning rate scheduler.
+        device (str): Device for training.
+        num_epochs (int): Number of training epochs.
+        model_saving_folder (str, optional): If provided, best model will be saved to this path.
     """
     model.to(device)
     best_val_acc = 0.0
-    os.makedirs(save_path, exist_ok=True) if save_path else None
+
+    if model_saving_folder:
+        os.makedirs(model_saving_folder, exist_ok=True)
+        best_model_path = os.path.join(model_saving_folder, "best_model.pth")
 
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0.0
-        for x, y in dataloader:
-            x, y = x.to(device), y.to(device)
+
+        for x_batch, y_batch in dataloader:
+            x_batch, y_batch = x_batch.to(device), y_batch.to(device)
             optimizer.zero_grad()
-            outputs = model(x)
-            loss = criterion(outputs, y)
+            outputs = model(x_batch)
+            loss = criterion(outputs, y_batch)
             if ewc:
                 loss += (lambda_ewc / 2) * ewc.penalty(model)
             loss.backward()
             optimizer.step()
-            total_loss += loss.item() * x.size(0)
+            total_loss += loss.item() * x_batch.size(0)
 
         avg_loss = total_loss / len(dataloader.dataset)
 
-        # Validation
+        # === Validation ===
         model.eval()
-        correct, total = 0, 0
+        val_correct, val_total = 0, 0
         with torch.no_grad():
             for x_val, y_val in val_loader:
                 x_val, y_val = x_val.to(device), y_val.to(device)
                 outputs = model(x_val)
-                predictions = torch.argmax(outputs, dim=-1)
-                correct += (predictions == y_val).sum().item()
-                total += y_val.size(0)
-        val_acc = correct / total
+                preds = torch.argmax(outputs, dim=1)
+                val_correct += (preds == y_val).sum().item()
+                val_total += y_val.size(0)
 
-        print(f"Epoch {epoch+1}/{num_epochs} — Loss: {avg_loss:.4f} | Val Acc: {val_acc*100:.2f}%")
+        val_acc = val_correct / val_total
+        print(f"[Epoch {epoch+1:03d}/{num_epochs}] Train Loss: {avg_loss:.4f} | Val Acc: {val_acc:.2%}")
 
-        if save_path and val_acc > best_val_acc:
+        # === Save Best Model ===
+        if model_saving_folder and val_acc > best_val_acc:
             best_val_acc = val_acc
-            torch.save(model.state_dict(), os.path.join(save_path, "best_model.pth"))
+            torch.save(model.state_dict(), best_model_path)
 
+        # === Scheduler Step ===
         if scheduler:
             scheduler.step(val_acc)
 
@@ -140,7 +159,6 @@ fisher_dict, params_dict = EWC.compute_fisher_and_params(
 ewc = EWC(fisher=fisher_dict, params=params_dict)
 
 # ==== Period 3: Train on new data with EWC protection ====
-from ewc import train_with_ewc
 
 train_with_ewc(
     model=model,                          # Model reused or reloaded from Period 2
@@ -153,7 +171,7 @@ train_with_ewc(
     scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min'),
     device=device,
     num_epochs=100,
-    save_path="./Trained_models/EWC/Period_3"
+    model_saving_folder="./Trained_models/EWC/Period_3"
 )
 """
 

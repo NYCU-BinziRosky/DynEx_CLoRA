@@ -1,207 +1,178 @@
 """
-pnn.py — Progressive Neural Network (PNN) for Continual Learning
+pnn.py — Progressive Neural Network (PNN) continual learning framework
 
-This module defines a progressive architecture where new task-specific
-columns are added while freezing previous knowledge, with lateral
-connections to encourage feature reuse.
+This module defines a PNN-based architecture where new task-specific columns are
+added sequentially. Lateral connections allow knowledge reuse from frozen columns.
 
-Includes:
-- Column definition (`PNNColumn`)
-- Wrapper for full PNN (`ProgressiveNN`)
-- Training loop (`train_with_pnn`)
+This framework includes:
+- Column module (`PNNColumn`) with lateral fusion
+- Wrapper (`ProgressiveNN`) for combining frozen base and new columns
+- Training function that updates only the new column
 
-Note: This is a task-agnostic framework. The user is responsible for assembling the correct model structure.
+Note: This is a task-agnostic framework. Users must define their own backbone structure.
 """
 
+import os
+import gc
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
-import os
-import time
-import shutil
-import gc
-import re
+from torch.utils.data import DataLoader
 
 
 class PNNColumn(nn.Module):
+    """
+    Defines a new column in PNN for the current task.
+    Receives lateral features from the base model and fuses them with its own transformation.
+    """
     def __init__(self, input_dim: int, output_dim: int, hidden_dim=512, dropout=0.2):
-        super(PNNColumn, self).__init__()
+        super().__init__()
         self.adapter = nn.Linear(input_dim, input_dim)
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(input_dim, output_dim)
 
     def forward(self, x: torch.Tensor, lateral_features: torch.Tensor) -> torch.Tensor:
-        fused = lateral_features + self.adapter(x)
+        """
+        Performs lateral fusion of base features and new input.
+        """
+        fused = self.adapter(x) + lateral_features
         fused = self.relu(fused)
         fused = self.dropout(fused)
         return self.classifier(fused)
 
 
 class ProgressiveNN(nn.Module):
-    def __init__(self, base_model: nn.Module, new_column: PNNColumn):
-        super(ProgressiveNN, self).__init__()
+    """
+    Wraps a frozen base model and a trainable new column for the current task.
+    Supports lateral feature transfer and logits fusion.
+    """
+    def __init__(self, base_model: nn.Module, new_column: nn.Module):
+        super().__init__()
         self.base_model = base_model
         self.new_column = new_column
         for p in self.base_model.parameters():
             p.requires_grad = False
 
-    def forward_features(self, x):
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Extracts base features for lateral fusion.
+        """
         return self.base_model.forward_features(x) if hasattr(self.base_model, 'forward_features') else self.base_model(x)
 
-    def get_base_logits(self, x):
-        with torch.no_grad():
-            return self.base_model(x)
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        base_features = self.forward_features(x)
-        base_logits = self.get_base_logits(x)
-        new_logits = self.new_column(x, lateral_features=base_features)
+        """
+        Runs inference using both base and new columns, and merges predictions.
+        """
+        base_feats = self.forward_features(x)
+        with torch.no_grad():
+            base_logits = self.base_model(x)
+        new_logits = self.new_column(x, base_feats)
         return torch.cat([base_logits, new_logits], dim=-1)
 
 
-def train_with_pnn(model, output_size, criterion, optimizer,
-                   X_train, y_train, X_val, y_val,
-                   scheduler=None, num_epochs=100, batch_size=64,
-                   model_saving_folder=None, model_name=None,
-                   stop_signal_file=None, period=None,
-                   device=None):
+def train_with_pnn(model, dataloader, val_loader, optimizer, criterion,
+                   scheduler=None, num_epochs=100, device='cuda',
+                   model_saving_folder=None):
     """
-    Generic PNN training loop. Only the new column is trained.
+    Training loop for Progressive Neural Networks. Only the new column is updated.
+
+    Arguments:
+        model (nn.Module): ProgressiveNN instance (base model frozen, new column trainable).
+        dataloader (DataLoader): Training data.
+        val_loader (DataLoader): Validation data.
+        optimizer (Optimizer): Optimizer instance.
+        criterion (Loss): Classification loss (e.g., CrossEntropyLoss).
+        scheduler (optional): Learning rate scheduler.
+        num_epochs (int): Total number of training epochs.
+        device (str): CUDA or CPU.
+        model_saving_folder (str, optional): Where to save the best model (new column only).
     """
-    print("\n🚀 'train_with_pnn' started.")
-    start_time = time.time()
-    device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
-
-    model_name = model_name or 'model'
-    model_saving_folder = model_saving_folder or './saved_models'
-    if os.path.exists(model_saving_folder):
-        shutil.rmtree(model_saving_folder)
-        print(f"✅ Removed existing folder: {model_saving_folder}")
-    os.makedirs(model_saving_folder, exist_ok=True)
-
-    X_train = torch.tensor(X_train, dtype=torch.float32).to(device)
-    y_train = torch.tensor(y_train, dtype=torch.long).to(device)
-    X_val = torch.tensor(X_val, dtype=torch.float32).to(device)
-    y_val = torch.tensor(y_val, dtype=torch.long).to(device)
-
-    train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=batch_size, shuffle=False)
-
     best_val_acc = 0.0
-    best_model_path = os.path.join(model_saving_folder, f"{model_name}_best.pth")
+
+    if model_saving_folder:
+        os.makedirs(model_saving_folder, exist_ok=True)
+        best_model_path = os.path.join(model_saving_folder, "best_model.pth")
 
     for epoch in range(num_epochs):
-        if stop_signal_file and os.path.exists(stop_signal_file):
-            print("🛑 Stop signal detected.")
-            break
-
         model.train()
         total_loss = 0.0
-        for X_batch, y_batch in train_loader:
+
+        for x_batch, y_batch in dataloader:
+            x_batch, y_batch = x_batch.to(device), y_batch.to(device)
             optimizer.zero_grad()
-            outputs = model(X_batch)
+            outputs = model(x_batch)
             loss = criterion(outputs, y_batch)
             loss.backward()
             optimizer.step()
-            total_loss += loss.item() * X_batch.size(0)
+            total_loss += loss.item() * x_batch.size(0)
 
-        avg_loss = total_loss / len(train_loader.dataset)
+        avg_loss = total_loss / len(dataloader.dataset)
 
+        # === Validation ===
         model.eval()
         val_correct, val_total = 0, 0
         with torch.no_grad():
-            for X_batch, y_batch in val_loader:
-                preds = torch.argmax(model(X_batch), dim=-1)
-                val_correct += (preds == y_batch).sum().item()
-                val_total += y_batch.size(0)
+            for x_val, y_val in val_loader:
+                x_val, y_val = x_val.to(device), y_val.to(device)
+                preds = model(x_val).argmax(dim=1)
+                val_correct += (preds == y_val).sum().item()
+                val_total += y_val.size(0)
 
         val_acc = val_correct / val_total
-        print(f"Epoch {epoch+1}/{num_epochs} — Train Loss: {avg_loss:.4f} | Val Acc: {val_acc*100:.2f}%")
+        print(f"[Epoch {epoch+1:03d}/{num_epochs}] Train Loss: {avg_loss:.4f} | Val Acc: {val_acc:.2%}")
 
-        if val_acc > best_val_acc:
+        if model_saving_folder and val_acc > best_val_acc:
             best_val_acc = val_acc
             torch.save(model.state_dict(), best_model_path)
 
         if scheduler:
             scheduler.step(val_acc)
 
-    training_time = time.time() - start_time
-    print(f"\n🏁 Finished training. Best Val Acc: {best_val_acc*100:.2f}%")
-    print(f"🕒 Training time: {training_time:.2f} seconds")
-
     gc.collect()
     torch.cuda.empty_cache()
 
 
 """
-Example: Using PNN in Period 3
-------------------------------
+Example: PNN Training Across Tasks
+----------------------------------
 
-# Step 1: Load frozen PNN from Period 2
-base_model = ProgressiveNN(...)
-base_model.load_state_dict(torch.load(".../Period_2/best_model.pth"))
-for p in base_model.parameters():
+# === Load frozen model from previous period ===
+prev_model = ProgressiveNN(...)  # contains frozen base model
+prev_model.load_state_dict(torch.load(".../Period_2/best_model.pth"))
+for p in prev_model.parameters():
     p.requires_grad = False
-base_model.eval()
 
-# Step 2: Create new column for new classes
-new_column = PNNColumn(input_dim=1024, output_dim=2)
+# === Create new column ===
+new_column = PNNColumn(input_dim=128, output_dim=2)
 
-# Step 3: Wrap into new PNN
-model = ProgressiveNN(base_model=base_model, new_column=new_column)
+# === Assemble full PNN ===
+model = ProgressiveNN(base_model=prev_model, new_column=new_column)
 
-# Step 4: Train
-from pnn import train_with_pnn
+# === Train new column ===
 
 train_with_pnn(
     model=model,
-    output_size=total_classes_up_to_now,
-    criterion=nn.CrossEntropyLoss(),
+    dataloader=period3_loader,
+    val_loader=period3_val_loader,
     optimizer=torch.optim.Adam(model.new_column.parameters(), lr=1e-3),
-    X_train=X_train,
-    y_train=y_train,
-    X_val=X_val,
-    y_val=y_val,
-    scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', patience=10, factor=0.9
-    ),
+    criterion=nn.CrossEntropyLoss(),
+    scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min'),
     num_epochs=100,
-    batch_size=64,
-    model_saving_folder="./Trained_models/PNN/Period_3",
-    model_name="ResNet18_PNN",
-    stop_signal_file="./stop_training.txt",
-    period=3,
-    device=torch.device('cuda')
+    device='cuda',
+    model_saving_folder="./Trained_models/PNN/Period_3"
 )
 """
 
 """
-Tips for Progressive Neural Networks
-------------------------------------
+Tips for PNN Usage
+------------------
 
-1. PNNColumn:
-   - Must support lateral fusion: it takes both the input and lateral features.
-   - Add dropout + relu for nonlinearity and regularization.
-
-2. base_model:
-   - Can be a standard model (Period 1) or another ProgressiveNN (Period ≥2).
-   - Recursively wraps earlier knowledge while freezing parameters.
-
-3. forward_features():
-   - Must be defined in your base model (e.g., ResNet18_1D).
-   - This should output a high-level feature vector for lateral reuse.
-
-4. Partial loading:
-   - It's fine if some keys (like FC layers) mismatch between periods.
-   - Only require consistency in shared feature structure.
-
-5. Training:
-   - Only train the `new_column`; freeze everything else.
-   - `model.new_column.parameters()` is the correct target for your optimizer.
-
-6. Memory cost:
-   - Increases linearly with number of tasks.
-   - Each new period adds a full set of layers in `new_column`.
+1. Only train the new column. Freeze all previous parameters.
+2. Use `model.new_column.parameters()` when constructing the optimizer.
+3. Ensure base model implements `forward_features()` for lateral reuse.
+4. Expansion is recursive: PNNs grow a new column every task.
+5. Output dimensions of base + new column must match full class set.
+6. This approach increases memory and model size linearly over tasks.
+7. This PNNColumn assumes the input and lateral features have the same dimensionality. Modify `adapter` as needed.
 """

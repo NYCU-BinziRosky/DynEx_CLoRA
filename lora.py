@@ -1,102 +1,82 @@
 """
-lora.py — Standard Low-Rank Adaptation (LoRA) Framework for Continual Learning
+lora.py — Standard Low-Rank Adaptation (LoRA) continual learning framework
 
-This module defines a task-agnostic training loop for models equipped
-with LoRA adapters. It assumes the model implements:
-- `init_lora()`: to initialize LoRA adapters in specific layers.
-- `get_trainable_parameters()`: to return only LoRA and classifier parameters for optimization.
+This module defines the training logic for models equipped with LoRA adapters.
+It assumes the model implements:
+- `init_lora()`: to initialize LoRA modules
+- `get_trainable_parameters()`: to return LoRA + classifier parameters for optimization
 
-Typical Workflow:
-- Initialize model for the current period.
-- Call `init_lora()` to prepare adapters.
-- Selectively load weights from the previous period (excluding FC and LoRA).
-- Train with LoRA adapters only.
-
-Note: This file does not define the model architecture. See `ResNet18_1D_LoRA` or others.
+Note: This is a task-agnostic implementation. The user must supply compatible model and data.
 """
-
-import os
-import time
-import gc
-import re
-import shutil
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
+import os
+import gc
 
 
-def train_with_lora(model, output_size, criterion, optimizer,
-                    X_train, y_train, X_val, y_val,
-                    scheduler=None, num_epochs=100, batch_size=64,
-                    model_saving_folder=None, model_name=None,
-                    stop_signal_file=None, device=None):
+def train_with_lora(model, dataloader, val_loader, optimizer, criterion,
+                    scheduler=None, num_epochs=100, device='cuda',
+                    model_saving_folder=None):
     """
-    Standard LoRA training loop — only LoRA + FC layers are trainable.
+    LoRA training loop — updates only LoRA and classifier layers.
+    
+    Arguments:
+        model (nn.Module): LoRA-compatible model.
+        dataloader (DataLoader): Training data.
+        val_loader (DataLoader): Validation data.
+        optimizer (Optimizer): Optimizer instance.
+        criterion (Loss): Loss function (e.g., CrossEntropyLoss).
+        scheduler (optional): Learning rate scheduler.
+        num_epochs (int): Total number of training epochs.
+        device (str): Computation device.
+        model_saving_folder (str, optional): Save path for best checkpoint.
     """
-    print("\n🚀 'train_with_lora' started.")
-    start_time = time.time()
-    device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    model_name = model_name or 'lora_model'
-    model_saving_folder = model_saving_folder or './saved_models'
-    if os.path.exists(model_saving_folder):
-        shutil.rmtree(model_saving_folder)
-        print(f"✅ Removed existing folder: {model_saving_folder}")
-    os.makedirs(model_saving_folder, exist_ok=True)
-
     model.to(device)
-
-    X_train = torch.tensor(X_train, dtype=torch.float32).to(device)
-    y_train = torch.tensor(y_train, dtype=torch.long).to(device)
-    X_val = torch.tensor(X_val, dtype=torch.float32).to(device)
-    y_val = torch.tensor(y_val, dtype=torch.long).to(device)
-
-    train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=batch_size, shuffle=False)
-
     best_val_acc = 0.0
-    best_model_path = os.path.join(model_saving_folder, f"{model_name}_best.pth")
+
+    if model_saving_folder:
+        os.makedirs(model_saving_folder, exist_ok=True)
+        best_model_path = os.path.join(model_saving_folder, "best_model.pth")
 
     for epoch in range(num_epochs):
-        if stop_signal_file and os.path.exists(stop_signal_file):
-            print("🛑 Stop signal detected.")
-            break
-
         model.train()
         total_loss = 0.0
-        for X_batch, y_batch in train_loader:
+
+        for x_batch, y_batch in dataloader:
+            x_batch, y_batch = x_batch.to(device), y_batch.to(device)
             optimizer.zero_grad()
-            outputs = model(X_batch)
+            outputs = model(x_batch)
             loss = criterion(outputs, y_batch)
             loss.backward()
             optimizer.step()
-            total_loss += loss.item() * X_batch.size(0)
+            total_loss += loss.item() * x_batch.size(0)
 
-        avg_loss = total_loss / len(train_loader.dataset)
+        avg_loss = total_loss / len(dataloader.dataset)
 
-        # Validation
+        # === Validation ===
         model.eval()
         val_correct, val_total = 0, 0
         with torch.no_grad():
-            for X_batch, y_batch in val_loader:
-                preds = torch.argmax(model(X_batch), dim=-1)
-                val_correct += (preds == y_batch).sum().item()
-                val_total += y_batch.size(0)
+            for x_val, y_val in val_loader:
+                x_val, y_val = x_val.to(device), y_val.to(device)
+                outputs = model(x_val)
+                preds = torch.argmax(outputs, dim=1)
+                val_correct += (preds == y_val).sum().item()
+                val_total += y_val.size(0)
 
         val_acc = val_correct / val_total
-        print(f"Epoch {epoch+1}/{num_epochs} — Train Loss: {avg_loss:.4f} | Val Acc: {val_acc*100:.2f}%")
+        print(f"[Epoch {epoch+1:03d}/{num_epochs}] Train Loss: {avg_loss:.4f} | Val Acc: {val_acc:.2%}")
 
-        if val_acc > best_val_acc:
+        # === Save Best Model ===
+        if model_saving_folder and val_acc > best_val_acc:
             best_val_acc = val_acc
             torch.save(model.state_dict(), best_model_path)
 
+        # === Scheduler Step ===
         if scheduler:
             scheduler.step(val_acc)
-
-    training_time = time.time() - start_time
-    print(f"\n🏁 Finished training. Best Val Acc: {best_val_acc*100:.2f}%")
-    print(f"🕒 Training time: {training_time:.2f} seconds")
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -106,49 +86,100 @@ def train_with_lora(model, output_size, criterion, optimizer,
 Example: Standard LoRA Training Across Periods
 ----------------------------------------------
 
-# === Period 2: Reconstruct Period 1 model FIRST ===
-model = ResNet18_1D_LoRA(input_channels=12, output_size=2, lora_rank=4)
-model.init_lora()  # Init BEFORE loading weights
+# === Period 2: Rebuild and initialize adapters ===
+model = YourLoRAModel(...)
+model.init_lora()  # Call before loading weights
 
-# Load previous weights (excluding FC and LoRA)
-prev_checkpoint = torch.load(".../Period_1/best_model.pth")
-prev_state = prev_checkpoint["model_state_dict"]
+# Load weights excluding LoRA and classifier
+prev_state = torch.load(".../Period_1/best_model.pth")
 model_dict = model.state_dict()
 filtered = {
     k: v for k, v in prev_state.items()
-    if k in model_dict and model_dict[k].shape == v.shape and not (k.startswith("fc") or "lora_adapter" in k)
+    if k in model_dict and model_dict[k].shape == v.shape and
+       not (k.startswith("fc") or "lora_adapter" in k)
 }
 model.load_state_dict(filtered, strict=False)
 
-# === Period 3+: Init LoRA FIRST, then load weights ===
-model = ResNet18_1D_LoRA(...)
-model.init_lora()
-# Load only base weights
-...
-
-# === Optimizer and training ===
-optimizer = torch.optim.Adam(model.get_trainable_parameters(), lr=1e-3, weight_decay=1e-5)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=10)
-
-from lora import train_with_lora
+# === Optimizer and Training ===
+optimizer = torch.optim.Adam(model.get_trainable_parameters(), lr=1e-3)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min')
 
 train_with_lora(
     model=model,
-    output_size=output_size,
-    criterion=nn.CrossEntropyLoss(),
+    dataloader=train_loader,
+    val_loader=val_loader,
     optimizer=optimizer,
-    X_train=X_train,
-    y_train=y_train,
-    X_val=X_val,
-    y_val=y_val,
+    criterion=nn.CrossEntropyLoss(),
     scheduler=scheduler,
     num_epochs=100,
-    batch_size=64,
-    model_saving_folder="./Trained_models/Standard_LoRA/Period_3",
-    model_name="ResNet18_1D_LoRA",
-    stop_signal_file="./stop_training.txt",
-    device=torch.device('cuda')
+    device='cuda',
+    model_saving_folder="./Trained_models/LoRA/Period_2"
 )
+"""
+
+"""
+LoRA Integration: Minimal Example
+----------------------------------
+
+# Example of a simple LoRA adapter inserted into a model
+
+class LoRAConv1d(nn.Module):
+    def __init__(self, conv_layer: nn.Conv1d, rank: int):
+        super().__init__()
+        self.conv = conv_layer
+        self.rank = rank
+        self.lora_A = nn.Parameter(torch.randn(conv_layer.out_channels, rank) * 0.01)
+        self.lora_B = nn.Parameter(torch.zeros(rank, conv_layer.in_channels * conv_layer.kernel_size[0]))
+
+    def forward(self, x):
+        # Compute low-rank weight
+        lora_weight = torch.matmul(self.lora_A, self.lora_B).view_as(self.conv.weight)
+        # Add LoRA perturbation
+        adapted_weight = self.conv.weight + lora_weight
+        # This replaces conv2 inside the model with a residual low-rank weight
+        return F.conv1d(x, adapted_weight, bias=self.conv.bias,
+                        stride=self.conv.stride, padding=self.conv.padding,
+                        dilation=self.conv.dilation, groups=self.conv.groups)
+
+
+# Assume your model has blocks where conv2 is the target of LoRA
+class MyModelWithLoRA(nn.Module):
+    def __init__(self, base_channels=64, output_dim=5, lora_rank=4):
+        super().__init__()
+        self.conv1 = nn.Conv1d(1, base_channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm1d(base_channels)
+        self.relu = nn.ReLU()
+        self.conv2 = nn.Conv1d(base_channels, base_channels, kernel_size=3, padding=1)
+        self.fc = nn.Linear(base_channels, output_dim)
+        self.lora_adapter = None
+        self.lora_rank = lora_rank
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+
+        if self.lora_adapter:
+            x = self.lora_adapter(x)
+        else:
+            x = self.conv2(x)
+
+        x = x.mean(dim=-1)
+        return self.fc(x)
+
+    def init_lora(self):
+        # Initialize and attach LoRA adapter to conv2
+        if self.lora_adapter is None:
+            self.lora_adapter = LoRAConv1d(self.conv2, rank=self.lora_rank)
+            print("LoRA adapter initialized")
+
+    def get_trainable_parameters(self):
+        # Return LoRA and FC parameters only
+        params = []
+        if self.lora_adapter:
+            params += list(self.lora_adapter.parameters())
+        params += list(self.fc.parameters())
+        return params
 """
 
 """
@@ -156,27 +187,19 @@ LoRA Training Notes
 --------------------
 
 1. init_lora():
-   - Must be called once per model (starting Period 2).
-   - Creates LoRAConv1d modules on specific internal layers (e.g., conv2 in BasicBlock).
+   - Must be called after model instantiation and before loading weights.
+   - Creates LoRA modules inside base layers (e.g., conv or linear).
 
-2. Load weights carefully:
-   - Avoid loading `fc.*` and `*.lora_adapter.*` parameters.
-   - Filter based on `key not in fc` and `not in lora_adapter`.
+2. Weight Loading:
+   - Only load base weights; skip keys containing `fc.` or `lora_adapter`.
 
 3. get_trainable_parameters():
-   - Should only return LoRA adapter weights and FC layer.
-   - Helps optimizer focus on the efficient subset of parameters.
+   - Should return a list of parameters from LoRA + final classifier only.
 
-4. Model structure:
-   - Use shared architecture (`ResNet18_1D_LoRA`) across periods.
-   - The base model remains frozen; only LoRA and FC are updated.
+4. Freezing:
+   - Ensure base weights remain frozen throughout training.
 
-5. Parameter Efficiency:
-   - Training cost is low (few parameters).
-   - Good for constrained environments or long sequences.
-
-6. Period Setup Summary:
-   - Period 1: Standard model training, no LoRA.
-   - Period 2: Rebuild model, call `init_lora()`, load base weights.
-   - Period ≥3: Call `init_lora()`, then load previous weights (same logic).
+5. Model Structure:
+   - Recommended to define a common base LoRA model for all periods (e.g., ResNet18_1D_LoRA).
 """
+

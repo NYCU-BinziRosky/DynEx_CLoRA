@@ -1,7 +1,3 @@
-# ================================
-# 📦 Imports
-# ================================
-
 # OS & file management
 import os
 import shutil
@@ -10,6 +6,7 @@ import time
 import gc
 import re
 import copy
+import pickle
 import numpy as np
 import torch
 import torch.nn as nn
@@ -24,19 +21,13 @@ from scipy.ndimage import gaussian_filter1d
 from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
 
-# ================================
-# 📁 Paths & Constants (user-defined)
-# ================================
-
 # Update this to your project root
-BASE_DIR = "./CPSC_CIL"
+BASE_DIR = "./cpsc2018"
 save_dir = os.path.join(BASE_DIR, "processed")  # Path to the preprocessed `.npy` files (one for each continual learning period).
 ECG_PATH = os.path.join(BASE_DIR, "datas")      # Directory containing original `.mat` and `.hea` files.
 MAX_LEN = 5000  # ECG signal sequence length
 
-# ================================
-# 🔤 SNOMED code mapping
-# ================================
+# NOMED code mapping
 snomed_map = {
     "426783006": "NSR",
     "270492004": "I-AVB",
@@ -57,9 +48,7 @@ period_label_map = {
     4: {"NSR": 0, "I-AVB": 2, "AF": 3, "LBBB": 4, "RBBB": 5, "PAC": 6, "PVC": 7, "STD": 8, "STE": 9}
 }
 
-# ================================
-# 📊 Class Distribution Utility
-# ================================
+# Utility Function
 def print_class_distribution(y, label_map):
     y = np.array(y).flatten()
     total = len(y)
@@ -71,16 +60,10 @@ def print_class_distribution(y, label_map):
         name = label[0] if label else str(lbl)
         print(f"  - Label {lbl:<2} ({name:<10}) → {count:>5} samples ({(count/total)*100:5.2f}%)")
 
-# ================================
-# 📂 Folder Utility
-# ================================
 def ensure_folder(folder_path: str) -> None:
     """Create a folder if it does not exist."""
     os.makedirs(folder_path, exist_ok=True)
 
-# ================================
-# ⚡ GPU Device Selector
-# ================================
 def auto_select_cuda_device(verbose=True):
     """Automatically select the least-used CUDA device, or fallback to CPU."""
     if not torch.cuda.is_available():
@@ -103,9 +86,6 @@ def auto_select_cuda_device(verbose=True):
             print(f"⚠️ GPU detection failed. Falling back to cuda:0 ({e})")
         return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# ================================
-# 📈 Class-wise Accuracy Utility
-# ================================
 def compute_classwise_accuracy(student_logits_flat, y_batch, class_correct, class_total):
     """Compute per-class accuracy."""
     if student_logits_flat.device != y_batch.device:
@@ -124,17 +104,12 @@ def compute_classwise_accuracy(student_logits_flat, y_batch, class_correct, clas
         class_total[label] += label_mask.sum().item()
         class_correct[label] += (label_mask & correct_mask).sum().item()
 
-# ================================
-# 📊 Model Parameter Info
-# ================================
 def get_model_parameter_info(model):
+    """Return total parameter count and size in MB for the given model."""
     total_params = sum(p.numel() for p in model.parameters())
     param_size_MB = total_params * 4 / (1024**2)
     return total_params, param_size_MB
 
-# ================================
-# ⚖️ Class Weights Calculator
-# ================================
 def compute_class_weights(y: np.ndarray, num_classes: int, exclude_classes: list = None) -> torch.Tensor:
     """Compute inverse-frequency class weights with optional exclusions."""
     exclude_classes = set(exclude_classes or [])
@@ -160,9 +135,6 @@ def compute_class_weights(y: np.ndarray, num_classes: int, exclude_classes: list
 
     return torch.tensor(weights, dtype=torch.float32)
 
-# ================================
-# 🔁 Forward Transfer Evaluation
-# ================================
 def compute_fwt_ecg(previous_model, init_model, X_val, y_val, known_classes, batch_size=64):
     """
     Compute Forward Transfer (FWT) score on ECG classification task.
@@ -214,11 +186,9 @@ def compute_fwt_ecg(previous_model, init_model, X_val, y_val, known_classes, bat
     print(f"🔍 Accuracy (prev): {acc_prev:.2f}% | Accuracy (init): {acc_init:.2f}% | FWT: {fwt:.2f}%")
     return fwt, acc_prev, acc_init
 
-# ================================
-# 🧠 ResNet18_1D + LoRA for ECG Input
-# ================================
-
+# Model
 class LoRAConv1d(nn.Module):
+    """LoRA module for adapting 1D convolutional layers."""
     def __init__(self, conv_layer: nn.Conv1d, rank: int):
         super().__init__()
         self.conv = conv_layer
@@ -233,11 +203,14 @@ class LoRAConv1d(nn.Module):
             self.conv.out_channels, self.conv.in_channels, self.conv.kernel_size[0]
         )
         adapted_weight = self.conv.weight + lora_weight
-        return F.conv1d(x, adapted_weight, bias=self.conv.bias,
-                        stride=self.conv.stride, padding=self.conv.padding,
-                        dilation=self.conv.dilation, groups=self.conv.groups)
+        return F.conv1d(
+            x, adapted_weight, bias=self.conv.bias,
+            stride=self.conv.stride, padding=self.conv.padding,
+            dilation=self.conv.dilation, groups=self.conv.groups
+        )
 
 class BasicBlock1d_LoRA(nn.Module):
+    """Residual block with optional LoRA adapter on conv2."""
     expansion = 1
 
     def __init__(self, inplanes, planes, stride=1, downsample=None, lora_rank=None):
@@ -253,27 +226,18 @@ class BasicBlock1d_LoRA(nn.Module):
 
     def forward(self, x):
         identity = x
-
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-
-        if self.lora_adapter is not None:
-            out = self.lora_adapter(out)
-        else:
-            out = self.conv2(out)
-
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.lora_adapter(out) if self.lora_adapter else self.conv2(out)
         out = self.bn2(out)
-
-        if self.downsample is not None:
+        if self.downsample:
             identity = self.downsample(x)
-
-        out += identity
-        out = self.relu(out)
-
-        return out
+        return self.relu(out + identity)
 
 class ResNet18_1D_LoRA(nn.Module):
+    """
+    ResNet18 1D variant with LoRA support for ECG classification.
+    Uses both average and max pooling for richer representation.
+    """
     def __init__(self, input_channels=12, output_size=9, inplanes=64, lora_rank=4):
         super().__init__()
         self.inplanes = inplanes
@@ -303,20 +267,15 @@ class ResNet18_1D_LoRA(nn.Module):
                 nn.Conv1d(self.inplanes, planes, kernel_size=1, stride=stride, bias=False),
                 nn.BatchNorm1d(planes),
             )
-
         layers = [block(self.inplanes, planes, stride, downsample, self.lora_rank)]
         self.inplanes = planes
         for _ in range(1, blocks):
             layers.append(block(self.inplanes, planes, lora_rank=self.lora_rank))
-
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        x = x.permute(0, 2, 1)
-
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
+        x = x.permute(0, 2, 1)  # (B, C, T)
+        x = self.relu(self.bn1(self.conv1(x)))
         x = self.maxpool(x)
 
         x = self.layer1(x)
@@ -332,6 +291,7 @@ class ResNet18_1D_LoRA(nn.Module):
         return self.fc(x)
 
     def init_weights(self):
+        """Kaiming initialization for Conv and Linear layers."""
         for m in self.modules():
             if isinstance(m, (nn.Conv1d, nn.Linear)):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -340,54 +300,22 @@ class ResNet18_1D_LoRA(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def init_lora(self):
-        lora_count = 0
+        """Attach LoRA adapters to conv2 layers in BasicBlock1d_LoRA."""
         for module in self.modules():
             if isinstance(module, BasicBlock1d_LoRA) and module.lora_adapter is None:
                 module.lora_adapter = LoRAConv1d(module.conv2, self.lora_rank).to(next(self.parameters()).device)
-                lora_count += 1
-        print(f"✅ LoRA adapters initialized for {lora_count} conv2 layers")
 
     def get_trainable_parameters(self):
-        lora_params, lora_names = [], []
-        fc_params, fc_names = [], []
-
-        total_params = sum(p.numel() for p in self.parameters())
-
-        for name, module in self.named_modules():
+        """Return LoRA + FC trainable parameters only."""
+        lora_params = []
+        for module in self.modules():
             if isinstance(module, LoRAConv1d):
-                lora_params.append(module.lora_A)
-                lora_names.append(f"{name}.lora_A")
-                lora_params.append(module.lora_B)
-                lora_names.append(f"{name}.lora_B")
+                lora_params.extend([module.lora_A, module.lora_B])
+        fc_params = list(self.fc.parameters())
+        return lora_params + fc_params
 
-        for name, param in self.fc.named_parameters():
-            fc_params.append(param)
-            fc_names.append(f"fc.{name}")
 
-        trainable_params = lora_params + fc_params
-        frozen_params = total_params - sum(p.numel() for p in trainable_params)
-        lora_param_count = sum(p.numel() for p in lora_params)
-        fc_param_count = sum(p.numel() for p in fc_params)
-        trainable_param_count = lora_param_count + fc_param_count
-
-        print(f"📊 Parameter Statistics:")
-        print(f"  - Total parameters: {total_params:,}")
-        print(f"  - Trainable parameters: {trainable_param_count:,} ({trainable_param_count/total_params*100:.2f}%)")
-        print(f"    - LoRA parameters: {lora_param_count:,} ({lora_param_count/total_params*100:.2f}%)")
-        print(f"    - FC parameters: {fc_param_count:,} ({fc_param_count/total_params*100:.2f}%)")
-        print(f"  - Frozen parameters: {frozen_params:,} ({frozen_params/total_params*100:.2f}%)")
-
-        print(f"🧠 Trainable parameter names:")
-        for name in lora_names:
-            print(f"  ✅ {name} (LoRA)")
-        for name in fc_names:
-            print(f"  ✅ {name} (FC)")
-
-        return trainable_params
-
-# ================================
-# 🔧 Training Function for Standard LoRA on ECG Dataset
-# ================================
+# Training Function
 def train_with_lora_ecg(
     model,
     output_size,
@@ -405,21 +333,32 @@ def train_with_lora_ecg(
     stop_signal_file=None,
     device=None
 ):
-    print("\n🚀 Starting ECG training with Standard LoRA...")
-    start_time = time.time()
+    """
+    ECG training loop using standard LoRA finetuning.
 
+    Arguments:
+        model (nn.Module): LoRA-based model.
+        output_size (int): Number of output classes.
+        criterion (Loss): Loss function (e.g., CrossEntropy).
+        optimizer (Optimizer): Optimizer instance.
+        X_train, y_train: Training data (numpy arrays).
+        X_val, y_val: Validation data (numpy arrays).
+        scheduler (optional): Learning rate scheduler.
+        num_epochs (int): Training epoch count.
+        batch_size (int): Mini-batch size.
+        model_saving_folder (str, optional): Output folder for best model.
+        model_name (str, optional): File prefix name for saved model.
+        stop_signal_file (str, optional): External kill-switch path.
+        device (torch.device, optional): Device to train on.
+    """
     device = device or auto_select_cuda_device()
     model_name = model_name or "lora_model"
     model_saving_folder = model_saving_folder or "./saved_models"
-
-    if os.path.exists(model_saving_folder):
-        shutil.rmtree(model_saving_folder)
-        print(f"✅ Removed existing folder: {model_saving_folder}")
     os.makedirs(model_saving_folder, exist_ok=True)
+    best_model_path = os.path.join(model_saving_folder, f"{model_name}_best.pth")
 
     model.to(device)
 
-    # Prepare data
     X_train = torch.tensor(X_train, dtype=torch.float32).to(device)
     y_train = torch.tensor(y_train, dtype=torch.long).to(device)
     X_val = torch.tensor(X_val, dtype=torch.float32).to(device)
@@ -428,15 +367,11 @@ def train_with_lora_ecg(
     train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=batch_size, shuffle=False)
 
-    print("\n✅ Dataset Summary:")
-    print(f"  - X_train: {X_train.shape}, y_train: {y_train.shape}")
-    print(f"  - X_val  : {X_val.shape}, y_val  : {y_val.shape}")
-
-    best_results = []
+    best_val_acc = 0.0
+    best_record = None
 
     for epoch in range(num_epochs):
         if stop_signal_file and os.path.exists(stop_signal_file):
-            print("\n🛑 Stop signal detected. Exiting training loop.")
             break
 
         model.train()
@@ -449,7 +384,6 @@ def train_with_lora_ecg(
             loss = criterion(outputs, y_batch)
             loss.backward()
             optimizer.step()
-
             epoch_loss += loss.item() * X_batch.size(0)
             compute_classwise_accuracy(outputs, y_batch, class_correct, class_total)
 
@@ -482,15 +416,8 @@ def train_with_lora_ecg(
             for c in sorted(val_class_total.keys())
         }
 
-        print(f"\n🌀 Epoch {epoch + 1}/{num_epochs}")
-        print(f"  - Train Loss     : {train_loss:.6f}")
-        print(f"  - Train Acc (per class): {train_acc}")
-        print(f"  - Val Loss       : {val_loss:.6f}")
-        print(f"  - Val Accuracy   : {val_acc * 100:.2f}%")
-        print(f"  - Val Acc (per class): {val_acc_cls}")
-        print(f"  - LR             : {optimizer.param_groups[0]['lr']:.6f}")
+        print(f"[Epoch {epoch+1:03d}/{num_epochs}] Train Loss: {train_loss:.4f} | Val Acc: {val_acc:.2%}")
 
-        model_path = os.path.join(model_saving_folder, f"{model_name}_epoch_{epoch+1}.pth")
         current = {
             "epoch": epoch + 1,
             "train_loss": train_loss,
@@ -501,63 +428,20 @@ def train_with_lora_ecg(
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "learning_rate": optimizer.param_groups[0]["lr"],
-            "model_path": model_path,
+            "model_path": best_model_path,
         }
 
-        if len(best_results) < 5 or val_acc > best_results[-1]["val_accuracy"]:
-            if len(best_results) == 5:
-                to_remove = best_results.pop()
-                if os.path.exists(to_remove["model_path"]):
-                    os.remove(to_remove["model_path"])
-                    print(f"🗑 Removed: {to_remove['model_path']}")
-            best_results.append(current)
-            best_results.sort(key=lambda x: (x["val_accuracy"], x["epoch"]), reverse=True)
-            torch.save(current, model_path)
-            print(f"✅ Saved model: {model_path}")
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_record = current
+            torch.save(current, best_model_path)
 
         if scheduler:
             scheduler.step(val_loss)
 
-    # === Final Output ===
-    training_time = time.time() - start_time
-    total_params, param_size_MB = get_model_parameter_info(model)
-
-    if best_results:
-        best = best_results[0]
-        best_model_path = os.path.join(model_saving_folder, f"{model_name}_best.pth")
-        torch.save(best, best_model_path)
-        print(f"\n🏆 Best model saved as: {best_model_path} (Val Acc: {best['val_accuracy'] * 100:.2f}%)")
-
-    final_model_path = os.path.join(model_saving_folder, f"{model_name}_final.pth")
-    torch.save(current, final_model_path)
-    print(f"\n📌 Final model saved as: {final_model_path}")
-
-    print("\n🎯 Top 5 Models:")
-    for res in best_results:
-        print(f"Epoch {res['epoch']} | Val Acc: {res['val_accuracy']*100:.2f}% | Model Path: {res['model_path']}")
-
-    print(f"\n🧠 Model Summary:")
-    print(f"  - Total Parameters: {total_params:,}")
-    print(f"  - Model Size      : {param_size_MB:.2f} MB")
-    print(f"  - Training Time   : {training_time:.2f} seconds")
-
-    match = re.search(r'Period_(\d+)', model_saving_folder)
-    period_label = match.group(1) if match else "?"
-    model_name_str = model.__class__.__name__
-
-    print("\n---")
-    print(f"### Period {period_label}")
-    print(f"+ Training time : {training_time:.2f} seconds")
-    print(f"+ Model         : {model_name_str}")
-    print(f"+ Best Epoch    : {best['epoch']}")
-    print(f"+ Val Accuracy  : {best['val_accuracy'] * 100:.2f}%")
-    print(f"+ Classwise Acc : {best['val_classwise_accuracy']}")
-    print(f"+ Parameters    : {total_params:,}")
-    print(f"+ Size (float32): {param_size_MB:.2f} MB")
-
-    del X_train, y_train, X_val, y_val, train_loader, val_loader, current
     torch.cuda.empty_cache()
     gc.collect()
+
 
 
 # ==========================================

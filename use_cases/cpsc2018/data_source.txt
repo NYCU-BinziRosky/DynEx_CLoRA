@@ -63,3 +63,9 @@ The dataset is saved under:
   ./processed/y_train_p{period}.npy
   ./processed/X_test_p{period}.npy
   ./processed/y_test_p{period}.npy
+
+Data Split:
+- For each period, the dataset is split into 80% training and 20% validation.
+- No separate test set is created. Validation performance is used throughout for continual learning evaluation.
+
+These files are used as inputs for each method's training scripts (e.g., cpsc_ewc.py).
