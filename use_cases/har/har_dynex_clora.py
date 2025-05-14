@@ -21,18 +21,16 @@ from scipy.ndimage import gaussian_filter1d
 from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
 
-# === Set working directory manually if needed ===
-# (This should point to your own project directory)
+# Set working directory
 Working_directory = os.path.normpath("path/to/your/project")
 os.chdir(Working_directory)
 
-# === Define base folder paths for HAR dataset ===
-# Replace with your actual dataset folder structure
+# Define base folder paths for HAR dataset
 BASE_DIR = "path/to/your/har_dataset"
 TRAIN_DIR = os.path.join(BASE_DIR, "train")
 TEST_DIR = os.path.join(BASE_DIR, "test")
 
-# === Human Activity label mapping (UCI HAR original labels) ===
+# Human Activity label mapping (UCI HAR original labels)
 activity_label_map = {
     1: "WALKING",
     2: "WALKING_UPSTAIRS",
@@ -42,22 +40,21 @@ activity_label_map = {
     6: "LAYING"
 }
 
-# === Load feature and label data ===
-# You must place preprocessed txt files under your specified directory
+# Load feature and label data
 X_train = np.loadtxt(os.path.join(TRAIN_DIR, "X_train.txt"))
 y_train = np.loadtxt(os.path.join(TRAIN_DIR, "y_train.txt")).astype(int)
 X_test = np.loadtxt(os.path.join(TEST_DIR, "X_test.txt"))
 y_test = np.loadtxt(os.path.join(TEST_DIR, "y_test.txt")).astype(int)
 
-# === Define label composition for each continual learning period ===
+# Period-to-original-label mapping
 period_label_map = {
     1: [4, 5],           # SITTING, STANDING
-    2: [4, 5, 1, 2, 3],  # Add merged WALKING
-    3: [4, 5, 1, 2, 3, 6],  # Add LAYING
-    4: [4, 5, 1, 2, 3, 6]   # Final: split walking variants
+    2: [4, 5, 1, 2, 3],  # + WALKING variants (merged)
+    3: [4, 5, 1, 2, 3, 6],  # + LAYING
+    4: [4, 5, 1, 2, 3, 6]   # same classes, but with walking variants separated
 }
 
-# === Define final consistent label IDs for training across all periods ===
+# Consistent label remapping across all periods (final label index)
 final_class_map = {
     "SITTING": 0,
     "STANDING": 1,
@@ -67,11 +64,11 @@ final_class_map = {
     "WALKING_DOWNSTAIRS": 5
 }
 
-# === Reverse mapping: ID to label string ===
+# Reverse mapping for readability
 label_name_from_id = {v: k for k, v in final_class_map.items()}
 
 
-# === Convert raw label to remapped label for a specific period ===
+# Convert raw label to remapped label for a specific period
 def map_label(label, period):
     name = activity_label_map[label]
     if period < 4:
@@ -83,7 +80,7 @@ def map_label(label, period):
         return final_class_map[name]
 
 
-# === Filter dataset by period and remap labels accordingly ===
+# Filter dataset by period and remap labels accordingly
 def get_period_dataset(X, y, period):
     allowed_labels = period_label_map[period]
     mask = np.isin(y, allowed_labels)
@@ -92,7 +89,7 @@ def get_period_dataset(X, y, period):
     return Xp, yp
 
 
-# === Utility: Print class distribution for diagnostics ===
+# Print class distribution for diagnostics
 def print_class_distribution(y, var_name: str, label_map: dict) -> None:
     y = np.array(y).flatten()
     unique, counts = np.unique(y, return_counts=True)
@@ -102,7 +99,7 @@ def print_class_distribution(y, var_name: str, label_map: dict) -> None:
         print(f"  ├─ Label {i:<2} ({label_map[i]:<20}) → {c:>5} samples ({(c/total)*100:>5.2f}%)")
 
 
-# === Generate remapped dataset for each period ===
+# Generate remapped dataset for each period
 period_datasets = {}
 
 for period in range(1, 5):
@@ -117,15 +114,12 @@ for period in range(1, 5):
     print_class_distribution(yp_train, f"Period {period} (Train)", label_name_from_id)
     print_class_distribution(yp_test, f"Period {period} (Test)", label_name_from_id)
 
-
-# === GPU device selection (auto detect least memory usage) ===
+# CUDA device auto-selection
 def auto_select_cuda_device(verbose=True):
-    """
-    Automatically selects the CUDA GPU with the least memory usage.
-    Falls back to CPU if no GPU is available.
-    """
+    """Automatically select the least-used CUDA device, or fallback to CPU."""
     if not torch.cuda.is_available():
-        print("🚫 No CUDA GPU available. Using CPU.")
+        if verbose:
+            print("⚠️ No CUDA device available. Using CPU.")
         return torch.device("cpu")
 
     try:
@@ -135,23 +129,15 @@ def auto_select_cuda_device(verbose=True):
         )
         memory_used = [int(x) for x in smi_output.strip().split('\n')]
         best_gpu = int(np.argmin(memory_used))
-
         if verbose:
-            print("🎯 Automatically selected GPU:")
-            print(f"    - CUDA Device ID : {best_gpu}")
-            print(f"    - Memory Used    : {memory_used[best_gpu]} MiB")
-            print(f"    - Device Name    : {torch.cuda.get_device_name(best_gpu)}")
+            print(f"🎯 Auto-selected GPU: {best_gpu} ({memory_used[best_gpu]} MiB used)")
         return torch.device(f"cuda:{best_gpu}")
     except Exception as e:
-        print(f"⚠️ Failed to auto-detect GPU. Falling back to cuda:0. ({e})")
+        if verbose:
+            print(f"⚠️ GPU detection failed. Falling back to cuda:0 ({e})")
         return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-
-# === Device assignment ===
-device = auto_select_cuda_device()
-
-
-# === Per-class accuracy computation ===
+# Utility Function
 def compute_classwise_accuracy(preds, targets, class_correct, class_total):
     """
     Computes per-class accuracy statistics from raw logits and ground truth labels.
@@ -170,8 +156,6 @@ def compute_classwise_accuracy(preds, targets, class_correct, class_total):
         class_total[label] = class_total.get(label, 0) + label_mask.sum().item()
         class_correct[label] = class_correct.get(label, 0) + (correct_mask & label_mask).sum().item()
 
-
-# === Forward Transfer (FWT) computation for HAR ===
 def compute_fwt_har(previous_model, init_model, X_val, y_val, known_classes, batch_size=64):
     """
     Computes Forward Transfer (FWT) for tabular HAR models (e.g., MLPs).
@@ -228,16 +212,8 @@ def compute_fwt_har(previous_model, init_model, X_val, y_val, known_classes, bat
     acc_init = correct_init / total
     fwt_value = acc_prev - acc_init
 
-    print(f"\n### 🔍 FWT Debug Info (HAR):")
-    print(f"- Total evaluated samples: {total}")
-    print(f"- Correct (PrevModel): {correct_prev} / {total} → Acc = {acc_prev:.4f}")
-    print(f"- Correct (InitModel): {correct_init} / {total} → Acc = {acc_init:.4f}")
-    print(f"- FWT = Acc_prev - Acc_init = {fwt_value:.4f}")
-
     return fwt_value, acc_prev, acc_init
 
-
-# === Utility: print total parameters and estimated model size ===
 def print_model_info(model):
     """
     Prints total number of parameters and estimated model size in MB.
@@ -252,34 +228,21 @@ def print_model_info(model):
     print(f"- Total Parameters: {total_params}")
     print(f"- Model Size (float32): {param_size_MB:.2f} MB")
 
-
+# Model
 class LoRA(nn.Module):
-    """
-    LoRA module for injecting low-rank adaptation into linear layers.
-
-    This module adds a learnable delta W = A @ B to an existing linear layer,
-    where A ∈ R^(in_features x r), B ∈ R^(r x out_features), and r << min(in, out).
-
-    Args:
-        linear_layer (nn.Linear): Linear layer to adapt.
-        rank (int): LoRA rank (low-dimensional subspace rank).
-    """
+    """Low-Rank Adapter for linear layers."""
     def __init__(self, linear_layer: nn.Linear, rank: int):
-        super(LoRA, self).__init__()
+        super().__init__()
         self.linear = linear_layer
-        self.rank = rank
-
         in_features, out_features = linear_layer.weight.shape
         self.A = nn.Parameter(torch.zeros(in_features, rank))
         self.B = nn.Parameter(torch.zeros(rank, out_features))
-
         nn.init.normal_(self.A, mean=0, std=1)
         nn.init.zeros_(self.B)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        lora_delta = self.A @ self.B
-        adapted_weight = self.linear.weight + lora_delta
-        return F.linear(x, adapted_weight, self.linear.bias)
+        delta = self.A @ self.B
+        return F.linear(x, self.linear.weight + delta, self.linear.bias)
 
     def parameters(self, recurse=True):
         return [self.A, self.B]
@@ -287,21 +250,12 @@ class LoRA(nn.Module):
 
 class HAR_MLP_LoRA_v2(nn.Module):
     """
-    HAR MLP model with support for multiple progressive LoRA adapters (DynEx-CLoRA).
-
-    This architecture enables dynamic expansion by sequentially adding LoRA adapters
-    to the second hidden layer (fc2), each representing a specific task or class group.
-
-    Args:
-        input_size (int): Number of input features.
-        hidden_size (int): Number of units per hidden layer.
-        output_size (int): Number of output classes.
-        dropout (float): Dropout rate (default: 0.2).
-        lora_rank (int): LoRA rank (default: 8).
+    MLP with progressive LoRA adapters (DynEx-CLoRA) on fc2.
+    Supports multiple adapters for dynamic class expansion.
     """
     def __init__(self, input_size: int, hidden_size: int, output_size: int,
                  dropout: float = 0.2, lora_rank: int = 8):
-        super(HAR_MLP_LoRA_v2, self).__init__()
+        super().__init__()
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.bn1 = nn.BatchNorm1d(hidden_size)
         self.relu1 = nn.ReLU()
@@ -309,7 +263,7 @@ class HAR_MLP_LoRA_v2(nn.Module):
 
         self.fc2 = nn.Linear(hidden_size, hidden_size)
         self.lora_rank = lora_rank
-        self.lora_adapters = nn.ModuleList()  # Store all LoRA modules (one per group)
+        self.lora_adapters = nn.ModuleList()
 
         self.bn2 = nn.BatchNorm1d(hidden_size)
         self.relu2 = nn.ReLU()
@@ -325,57 +279,61 @@ class HAR_MLP_LoRA_v2(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def add_lora_adapter(self):
-        """
-        Adds a new LoRA adapter to fc2. Each call appends a group representing
-        a newly introduced class cluster (DynEx logic).
-        """
+        """Append a new LoRA adapter to fc2."""
         new_lora = LoRA(self.fc2, self.lora_rank).to(self.fc2.weight.device)
         self.lora_adapters.append(new_lora)
-        print(f"✅ Added LoRA adapter to HAR_MLP_LoRA_v2 (fc2), total adapters: {len(self.lora_adapters)}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.fc1(x)
-        x = self.bn1(x)
-        x = self.relu1(x)
-        x = self.dropout1(x)
-
+        x = self.dropout1(self.relu1(self.bn1(self.fc1(x))))
         x_base = self.fc2(x)
 
         if self.lora_adapters:
-            lora_delta = sum(lora.A @ lora.B for lora in self.lora_adapters)
-            adapted_weight = self.fc2.weight + lora_delta
-            x = F.linear(x, adapted_weight, self.fc2.bias)
+            delta = sum(lora.A @ lora.B for lora in self.lora_adapters)
+            x = F.linear(x, self.fc2.weight + delta, self.fc2.bias)
         else:
             x = x_base
 
-        x = self.bn2(x)
-        x = self.relu2(x)
-        x = self.dropout2(x)
-        x = self.fc3(x)
-        return x
+        x = self.dropout2(self.relu2(self.bn2(x)))
+        return self.fc3(x)
 
 
-def train_with_dynex_clora(model, teacher_model, output_size, criterion, optimizer,
-                           X_train, y_train, X_val, y_val,
-                           num_epochs, batch_size, alpha,
-                           model_saving_folder, model_name,
-                           stop_signal_file=None, scheduler=None,
-                           period=None, stable_classes=None,
-                           similarity_threshold=0.0,
-                           class_features_dict=None, related_labels=None):
-    model_name = model_name or 'dynex_clora_model'
-    model_saving_folder = model_saving_folder or './saved_models'
-
-    if model_saving_folder:
-        if os.path.exists(model_saving_folder):
-            shutil.rmtree(model_saving_folder)
-        os.makedirs(model_saving_folder, exist_ok=True)
-
-    device = auto_select_cuda_device()
+# Training Function
+def train_with_dynex_clora(
+    model,
+    teacher_model,
+    output_size,
+    criterion,
+    optimizer,
+    X_train,
+    y_train,
+    X_val,
+    y_val,
+    num_epochs,
+    batch_size,
+    alpha,
+    model_saving_folder,
+    model_name,
+    stop_signal_file=None,
+    scheduler=None,
+    period=None,
+    stable_classes=None,
+    similarity_threshold=0.0,
+    class_features_dict=None,
+    related_labels=None,
+    device=None
+):
+    """
+    HAR DynEx-CLoRA training loop with similarity-driven adapter assignment.
+    """
+    device = device or auto_select_cuda_device()
     model.to(device)
     if teacher_model:
         teacher_model.to(device)
         teacher_model.eval()
+
+    model_name = model_name or "dynex_model"
+    os.makedirs(model_saving_folder, exist_ok=True)
+    best_model_path = os.path.join(model_saving_folder, f"{model_name}_best.pth")
 
     X_train = torch.tensor(X_train, dtype=torch.float32).to(device)
     y_train = torch.tensor(y_train, dtype=torch.long).to(device)
@@ -385,35 +343,25 @@ def train_with_dynex_clora(model, teacher_model, output_size, criterion, optimiz
     train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=batch_size, shuffle=False)
 
-    start_time = time.time()
-    best_results = []
-
-    # === Class Feature Extraction ===
+    # === Feature Extraction (fc1)
     model.eval()
     new_class_features = {}
     with torch.no_grad():
         for xb, yb in train_loader:
             x = model.relu1(model.bn1(model.fc1(xb)))
             for cls in torch.unique(yb):
-                cls_mask = (yb == cls)
-                cls_feat = x[cls_mask]
-                if cls.item() not in new_class_features:
-                    new_class_features[cls.item()] = []
-                new_class_features[cls.item()].append(cls_feat)
+                mask = (yb == cls)
+                cls_feat = x[mask]
+                new_class_features.setdefault(cls.item(), []).append(cls_feat)
     for cls in new_class_features:
         new_class_features[cls] = torch.cat(new_class_features[cls], dim=0).mean(dim=0)
 
     to_unfreeze = set()
+    related_labels = related_labels or {}
 
     if period == 1:
-        for p in model.fc1.parameters(): p.requires_grad = True
-        for p in model.fc2.parameters(): p.requires_grad = True
-        for p in model.fc3.parameters(): p.requires_grad = True
-        for adapter in model.lora_adapters:
-            for p in adapter.parameters():
-                p.requires_grad = True
-
-    elif period > 1 and class_features_dict:
+        for p in model.parameters(): p.requires_grad = True
+    elif class_features_dict:
         cosine_sim = torch.nn.CosineSimilarity(dim=0)
         new_lora_indices = []
         existing_classes = set(class_features_dict.keys())
@@ -422,84 +370,88 @@ def train_with_dynex_clora(model, teacher_model, output_size, criterion, optimiz
 
         for new_cls in new_classes:
             new_feat = new_class_features[new_cls]
-            sims = [cosine_sim(new_feat.to(device), class_features_dict[old_cls].to(device)).item()
-                    for old_cls in class_features_dict]
-
             matched = False
-            for i, old_cls in enumerate(class_features_dict):
-                if sims[i] >= similarity_threshold:
-                    matched = True
+            for old_cls in class_features_dict:
+                sim = cosine_sim(new_feat.to(device), class_features_dict[old_cls].to(device)).item()
+                if sim >= similarity_threshold:
                     for k, v in related_labels.items():
                         if old_cls in v:
                             to_unfreeze.add(k)
-                            if new_cls not in related_labels[k]:
-                                related_labels[k].append(new_cls)
+                            if new_cls not in v:
+                                related_labels[k].append(new_cls)                                
+                if matched:
+                    break
             if not matched:
                 model.add_lora_adapter()
-                new_idx = len(model.lora_adapters) - 1
-                related_labels[new_idx] = [new_cls]
-                new_lora_indices.append(new_idx)
+                idx = len(model.lora_adapters) - 1
+                related_labels[idx] = [new_cls]
+                new_lora_indices.append(idx)
 
-        for old_cls in existing_classes:
-            if old_cls in new_class_features:
-                sim_self = cosine_sim(new_class_features[old_cls].to(device), class_features_dict[old_cls].to(device)).item()
-                if sim_self < similarity_threshold:
-                    for k, v in related_labels.items():
-                        if old_cls in v:
-                            to_unfreeze.add(k)
+        for old_cls in existing_classes & current_classes:
+            sim_self = cosine_sim(new_class_features[old_cls].to(device), class_features_dict[old_cls].to(device)).item()
+            if sim_self < similarity_threshold:
+                for k, v in related_labels.items():
+                    if old_cls in v:
+                        to_unfreeze.add(k)
 
+        # === Parameter Freezing/Unfreezing ===
         for adapter in model.lora_adapters:
             for p in adapter.parameters():
                 p.requires_grad = False
         for p in model.fc2.parameters():
             p.requires_grad = False
 
-        for idx in to_unfreeze:
+        for idx in to_unfreeze | set(new_lora_indices):
             if isinstance(idx, int):
                 for p in model.lora_adapters[idx].parameters():
                     p.requires_grad = True
             elif idx == "fc2":
                 for p in model.fc2.parameters():
                     p.requires_grad = True
-        for idx in new_lora_indices:
-            for p in model.lora_adapters[idx].parameters():
-                p.requires_grad = True
         for p in model.fc3.parameters():
             p.requires_grad = True
 
-    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=optimizer.param_groups[0]['lr'])
+    # Reset optimizer
+    optimizer = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=optimizer.param_groups[0]["lr"],
+        weight_decay=optimizer.param_groups[0].get("weight_decay", 0)
+    )
+
+    best_val_acc = 0.0
+    best_record = None
 
     for epoch in range(num_epochs):
         if stop_signal_file and os.path.exists(stop_signal_file):
             break
 
         model.train()
-        epoch_loss = 0.0
+        total_loss = 0.0
         class_correct, class_total = {}, {}
 
         for xb, yb in train_loader:
             optimizer.zero_grad()
             logits = model(xb).view(-1, output_size)
             yb_flat = yb.view(-1)
-            ce_loss = criterion(logits, yb_flat)
 
+            ce_loss = criterion(logits, yb_flat)
             if teacher_model and stable_classes:
                 with torch.no_grad():
-                    teacher_logits = teacher_model(xb)
+                    teacher_logits = teacher_model(xb).view(-1, output_size)
                 student_stable = logits[:, stable_classes]
                 teacher_stable = teacher_logits[:, stable_classes]
                 distill_loss = F.mse_loss(student_stable, teacher_stable)
-                total_loss = alpha * distill_loss + (1 - alpha) * ce_loss
+                total_loss_batch = alpha * distill_loss + (1 - alpha) * ce_loss
             else:
-                total_loss = ce_loss
+                total_loss_batch = ce_loss
 
-            total_loss.backward()
+            total_loss_batch.backward()
             optimizer.step()
-            epoch_loss += total_loss.item() * xb.size(0)
+            total_loss += total_loss_batch.item() * xb.size(0)
             compute_classwise_accuracy(logits, yb_flat, class_correct, class_total)
 
-        train_loss = epoch_loss / len(train_loader.dataset)
-        train_acc = {int(k): f"{(class_correct[k] / class_total[k]) * 100:.2f}%" if class_total[k] > 0 else "0.00%" for k in class_total}
+        train_loss = total_loss / len(train_loader.dataset)
+        train_acc = {int(c): f"{(class_correct[c] / class_total[c]) * 100:.2f}%" if class_total[c] > 0 else "0.00%" for c in class_total}
 
         model.eval()
         val_loss, val_correct, val_total = 0.0, 0, 0
@@ -516,43 +468,32 @@ def train_with_dynex_clora(model, teacher_model, output_size, criterion, optimiz
 
         val_loss /= len(val_loader.dataset)
         val_acc = val_correct / val_total
-        val_acc_cls = {int(k): f"{(val_class_correct[k]/val_class_total[k])*100:.2f}%" if val_class_total[k]>0 else "0.00%" for k in val_class_total}
+        val_acc_cls = {int(c): f"{(val_class_correct[c]/val_class_total[c])*100:.2f}%" if val_class_total[c]>0 else "0.00%" for c in val_class_total}
 
-        model_path = os.path.join(model_saving_folder, f"{model_name}_epoch_{epoch+1}.pth")
+        print(f"[Epoch {epoch+1:03d}/{num_epochs}] Train Loss: {train_loss:.4f} | Val Acc: {val_acc:.2%}")
+
         current = {
-            'epoch': epoch + 1,
-            'train_loss': train_loss,
-            'val_loss': val_loss,
-            'val_accuracy': val_acc,
-            'train_classwise_accuracy': train_acc,
-            'val_classwise_accuracy': val_acc_cls,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'learning_rate': optimizer.param_groups[0]['lr'],
-            'model_path': model_path,
-            'num_lora_adapters': len(model.lora_adapters),
-            'related_labels': related_labels
+            "epoch": epoch + 1,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "val_accuracy": val_acc,
+            "train_classwise_accuracy": train_acc,
+            "val_classwise_accuracy": val_acc_cls,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "learning_rate": optimizer.param_groups[0]["lr"],
+            "model_path": best_model_path,
+            "num_lora_adapters": len(model.lora_adapters),
+            "related_labels": related_labels
         }
 
-        if len(best_results) < 5 or val_acc > best_results[-1]['val_accuracy']:
-            if len(best_results) == 5:
-                to_remove = best_results.pop()
-                if os.path.exists(to_remove['model_path']):
-                    os.remove(to_remove['model_path'])
-            best_results.append(current)
-            best_results.sort(key=lambda x: (x['val_accuracy'], x['epoch']), reverse=True)
-            torch.save(current, model_path)
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_record = current
+            torch.save(current, best_model_path)
 
         if scheduler:
             scheduler.step(val_loss)
-
-    final_model_path = os.path.join(model_saving_folder, f"{model_name}_final.pth")
-    torch.save(current, final_model_path)
-
-    if best_results:
-        best_model = best_results[0]
-        best_model_path = os.path.join(model_saving_folder, f"{model_name}_best.pth")
-        torch.save(best_model, best_model_path)
 
     if class_features_dict is None:
         class_features_dict = {}
@@ -562,6 +503,7 @@ def train_with_dynex_clora(model, teacher_model, output_size, criterion, optimiz
 
     torch.cuda.empty_cache()
     gc.collect()
+
 
 
 # === Common Configuration ===

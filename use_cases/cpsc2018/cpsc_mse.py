@@ -416,52 +416,53 @@ def train_with_mse_ecg(
 # ==========================================
 # 🚨 Note:
 # Period 1 model is shared across all methods.
-# Ensure it is trained separately and referenced here.
+# You may reuse the one trained in `cpsc_ewc.py`,
+# or train it using the current method's training function
+# (as long as the model architecture is consistent).
 # ==========================================
 
-# ================================
-# 📌 Period 2: MSE Distillation Training
-# ================================
+
+# Period 2
 period = 2
 prev_period = 1
 
-stop_signal_file = os.path.join(BASE_DIR, "stop_training.txt")
-model_saving_folder = os.path.join(BASE_DIR, "MSE_CIL", f"Period_{period}")
+# ==== Paths ====
+stop_signal_file = "path/to/your/stop_signal_file.txt"
+model_saving_folder = "path/to/your/model_saving_folder"
+teacher_model_path = "path/to/your/period1_best_model.pth"
 ensure_folder(model_saving_folder)
 
+# ==== Load Data ====
 X_train = np.load(os.path.join(save_dir, f"X_train_p{period}.npy"))
 y_train = np.load(os.path.join(save_dir, f"y_train_p{period}.npy"))
-X_val = np.load(os.path.join(save_dir, f"X_test_p{period}.npy"))
-y_val = np.load(os.path.join(save_dir, f"y_test_p{period}.npy"))
+X_val   = np.load(os.path.join(save_dir, f"X_test_p{period}.npy"))
+y_val   = np.load(os.path.join(save_dir, f"y_test_p{period}.npy"))
 
+# ==== Model Configuration ====
 device = auto_select_cuda_device()
 input_channels = X_train.shape[2]
 output_size = len(np.unique(y_train))
-model_name = "ResNet18_1D"
+model_name = "mse_period2"
 
-# Student model
 student_model = ResNet18_1D(input_channels=input_channels, output_size=output_size).to(device)
-
-# Teacher model (from Period 1)
-teacher_model_path = os.path.join(BASE_DIR, "ResNet18_Pretrained", "ResNet18_1D_best.pth")
-teacher_checkpoint = torch.load(teacher_model_path, map_location=device)
 teacher_output_size = len(np.unique(np.load(os.path.join(save_dir, f"y_train_p{prev_period}.npy"))))
 teacher_model = ResNet18_1D(input_channels=input_channels, output_size=teacher_output_size).to(device)
 
-teacher_state = teacher_checkpoint["model_state_dict"]
-model_state = teacher_model.state_dict()
-filtered_teacher = {k: v for k, v in teacher_state.items() if k in model_state and model_state[k].shape == v.shape}
+teacher_checkpoint = torch.load(teacher_model_path, map_location=device)
+filtered_teacher = {
+    k: v for k, v in teacher_checkpoint["model_state_dict"].items()
+    if k in teacher_model.state_dict() and teacher_model.state_dict()[k].shape == v.shape
+}
 teacher_model.load_state_dict(filtered_teacher, strict=False)
 teacher_model.eval()
-print("✅ Loaded Period 1 teacher weights (FC excluded)")
 
-# Stable class list
+# ==== Stable Classes ====
 stable_classes = [0]
 
-# Training config
+# ==== Training Config ====
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(student_model.parameters(), lr=1e-3, weight_decay=1e-5)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=10)
+optimizer = torch.optim.Adam(student_model.parameters(), lr=1e-3, weight_decay=1e-5)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.9, patience=10)
 
 train_with_mse_ecg(
     student_model=student_model,
@@ -484,49 +485,48 @@ train_with_mse_ecg(
     device=device
 )
 
-del student_model, teacher_model, X_train, y_train, X_val, y_val
-gc.collect()
-torch.cuda.empty_cache()
 
-# ================================
-# 📌 Period 3: MSE Distillation Training
-# ================================
+# Period 3
 period = 3
 prev_period = 2
 
-stop_signal_file = os.path.join(BASE_DIR, "stop_training.txt")
-model_saving_folder = os.path.join(BASE_DIR, "MSE_CIL", f"Period_{period}")
+# ==== Paths ====
+stop_signal_file = "path/to/your/stop_signal_file.txt"
+model_saving_folder = "path/to/your/model_saving_folder"
+teacher_model_path = "path/to/your/period2_best_model.pth"
 ensure_folder(model_saving_folder)
 
+# ==== Load Data ====
 X_train = np.load(os.path.join(save_dir, f"X_train_p{period}.npy"))
 y_train = np.load(os.path.join(save_dir, f"y_train_p{period}.npy"))
-X_val = np.load(os.path.join(save_dir, f"X_test_p{period}.npy"))
-y_val = np.load(os.path.join(save_dir, f"y_test_p{period}.npy"))
+X_val   = np.load(os.path.join(save_dir, f"X_test_p{period}.npy"))
+y_val   = np.load(os.path.join(save_dir, f"y_test_p{period}.npy"))
 
+# ==== Model Configuration ====
 device = auto_select_cuda_device()
 input_channels = X_train.shape[2]
 output_size = len(np.unique(y_train))
-model_name = "ResNet18_1D"
+model_name = "mse_period3"
 
 student_model = ResNet18_1D(input_channels=input_channels, output_size=output_size).to(device)
-
-teacher_model_path = os.path.join(BASE_DIR, "MSE_CIL", f"Period_{prev_period}", f"{model_name}_best.pth")
-teacher_checkpoint = torch.load(teacher_model_path, map_location=device)
 teacher_output_size = len(np.unique(np.load(os.path.join(save_dir, f"y_train_p{prev_period}.npy"))))
 teacher_model = ResNet18_1D(input_channels=input_channels, output_size=teacher_output_size).to(device)
 
-teacher_state = teacher_checkpoint["model_state_dict"]
-model_state = teacher_model.state_dict()
-filtered_teacher = {k: v for k, v in teacher_state.items() if k in model_state and model_state[k].shape == v.shape}
+teacher_checkpoint = torch.load(teacher_model_path, map_location=device)
+filtered_teacher = {
+    k: v for k, v in teacher_checkpoint["model_state_dict"].items()
+    if k in teacher_model.state_dict() and teacher_model.state_dict()[k].shape == v.shape
+}
 teacher_model.load_state_dict(filtered_teacher, strict=False)
 teacher_model.eval()
-print("✅ Loaded Period 2 teacher weights (FC excluded)")
 
+# ==== Stable Classes ====
 stable_classes = [0, 2, 3]
 
+# ==== Training Config ====
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(student_model.parameters(), lr=1e-3, weight_decay=1e-5)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=10)
+optimizer = torch.optim.Adam(student_model.parameters(), lr=1e-3, weight_decay=1e-5)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.9, patience=10)
 
 train_with_mse_ecg(
     student_model=student_model,
@@ -549,49 +549,48 @@ train_with_mse_ecg(
     device=device
 )
 
-del student_model, teacher_model, X_train, y_train, X_val, y_val
-gc.collect()
-torch.cuda.empty_cache()
 
-# ================================
-# 📌 Period 4: MSE Distillation Training
-# ================================
+# Period 4
 period = 4
 prev_period = 3
 
-stop_signal_file = os.path.join(BASE_DIR, "stop_training.txt")
-model_saving_folder = os.path.join(BASE_DIR, "MSE_CIL", f"Period_{period}")
+# ==== Paths ====
+stop_signal_file = "path/to/your/stop_signal_file.txt"
+model_saving_folder = "path/to/your/model_saving_folder"
+teacher_model_path = "path/to/your/period3_best_model.pth"
 ensure_folder(model_saving_folder)
 
+# ==== Load Data ====
 X_train = np.load(os.path.join(save_dir, f"X_train_p{period}.npy"))
 y_train = np.load(os.path.join(save_dir, f"y_train_p{period}.npy"))
-X_val = np.load(os.path.join(save_dir, f"X_test_p{period}.npy"))
-y_val = np.load(os.path.join(save_dir, f"y_test_p{period}.npy"))
+X_val   = np.load(os.path.join(save_dir, f"X_test_p{period}.npy"))
+y_val   = np.load(os.path.join(save_dir, f"y_test_p{period}.npy"))
 
+# ==== Model Configuration ====
 device = auto_select_cuda_device()
 input_channels = X_train.shape[2]
 output_size = int(np.max(y_train)) + 1
-model_name = "ResNet18_1D"
+model_name = "mse_period4"
 
 student_model = ResNet18_1D(input_channels=input_channels, output_size=output_size).to(device)
-
-teacher_model_path = os.path.join(BASE_DIR, "MSE_CIL", f"Period_{prev_period}", f"{model_name}_best.pth")
-teacher_checkpoint = torch.load(teacher_model_path, map_location=device)
 teacher_output_size = len(np.unique(np.load(os.path.join(save_dir, f"y_train_p{prev_period}.npy"))))
 teacher_model = ResNet18_1D(input_channels=input_channels, output_size=teacher_output_size).to(device)
 
-teacher_state = teacher_checkpoint["model_state_dict"]
-model_state = teacher_model.state_dict()
-filtered_teacher = {k: v for k, v in teacher_state.items() if k in model_state and model_state[k].shape == v.shape}
+teacher_checkpoint = torch.load(teacher_model_path, map_location=device)
+filtered_teacher = {
+    k: v for k, v in teacher_checkpoint["model_state_dict"].items()
+    if k in teacher_model.state_dict() and teacher_model.state_dict()[k].shape == v.shape
+}
 teacher_model.load_state_dict(filtered_teacher, strict=False)
 teacher_model.eval()
-print("✅ Loaded Period 3 teacher weights (FC excluded)")
 
+# ==== Stable Classes ====
 stable_classes = [0, 2, 3, 4, 5]
 
+# ==== Training Config ====
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(student_model.parameters(), lr=1e-3, weight_decay=1e-5)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=10)
+optimizer = torch.optim.Adam(student_model.parameters(), lr=1e-3, weight_decay=1e-5)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.9, patience=10)
 
 train_with_mse_ecg(
     student_model=student_model,
@@ -613,7 +612,3 @@ train_with_mse_ecg(
     stop_signal_file=stop_signal_file,
     device=device
 )
-
-del student_model, teacher_model, X_train, y_train, X_val, y_val
-gc.collect()
-torch.cuda.empty_cache()

@@ -462,45 +462,51 @@ def train_with_pnn_ecg(
 # ==========================================
 # 🚨 Note:
 # Period 1 model is shared across all methods.
-# Ensure it is trained separately and referenced here.
+# You may reuse the one trained in `cpsc_ewc.py`,
+# or train it using the current method's training function
+# (as long as the model architecture is consistent).
 # ==========================================
 
-# ================================
-# 📌 Period 2: PNN Training
-# ================================
+
+# Period 2
 period = 2
 
-stop_signal_file = os.path.join(BASE_DIR, "stop_training.txt")
-model_saving_folder = os.path.join(BASE_DIR, "PNN_CIL_v2", f"Period_{period}")
+# ==== Paths ====
+stop_signal_file = "path/to/your/stop_signal_file.txt"
+model_saving_folder = "path/to/your/model_saving_folder"
+prev_model_path = "path/to/your/period1_best_model.pth"
 ensure_folder(model_saving_folder)
 
+# ==== Load Data ====
 X_train = np.load(os.path.join(save_dir, f"X_train_p{period}.npy"))
 y_train = np.load(os.path.join(save_dir, f"y_train_p{period}.npy"))
 X_val   = np.load(os.path.join(save_dir, f"X_test_p{period}.npy"))
 y_val   = np.load(os.path.join(save_dir, f"y_test_p{period}.npy"))
 
+# ==== Model Configuration ====
 device = auto_select_cuda_device()
 input_channels = X_train.shape[2]
 output_size = len(np.unique(y_train))
 new_output_size = 2
 prev_output_size = output_size - new_output_size
 
-prev_model_path = os.path.join(BASE_DIR, "ResNet18_Selection", "ResNet18_big_inplane_v1", "ResNet18_big_inplane_1D_best.pth")
+# ==== Load Frozen Base Model from Period 1 ====
 prev_checkpoint = torch.load(prev_model_path, map_location=device)
-
 frozen_model = ResNet18_1D(input_channels=input_channels, output_size=prev_output_size)
 frozen_model.load_state_dict(prev_checkpoint["model_state_dict"], strict=True)
 frozen_model.to(device)
 frozen_model.eval()
-for p in frozen_model.parameters():
-    p.requires_grad = False
+for param in frozen_model.parameters():
+    param.requires_grad = False
 
+# ==== Create and Attach New Column ====
 new_column = ECG_PNN_Column(input_dim=1024, output_dim=new_output_size, hidden_dim=512, dropout=0.2)
 model = ECG_ProgressiveNN(base_model=frozen_model, new_column=new_column).to(device)
 
+# ==== Training Config ====
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.new_column.parameters(), lr=1e-3, weight_decay=1e-5)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.9, patience=10)
+optimizer = torch.optim.Adam(model.new_column.parameters(), lr=1e-3, weight_decay=1e-5)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", factor=0.9, patience=10)
 
 train_with_pnn_ecg(
     model=model,
@@ -515,53 +521,54 @@ train_with_pnn_ecg(
     num_epochs=200,
     batch_size=64,
     model_saving_folder=model_saving_folder,
-    model_name="ResNet18_PNN",
+    model_name="pnn_period2",
     stop_signal_file=stop_signal_file,
     period=period,
     device=device
 )
 
-del X_train, y_train, X_val, y_val, frozen_model, new_column, model
-gc.collect()
-torch.cuda.empty_cache()
 
-# ================================
-# 📌 Period 3: PNN Training
-# ================================
+# Period 3
 period = 3
 
-stop_signal_file = os.path.join(BASE_DIR, "stop_training.txt")
-model_saving_folder = os.path.join(BASE_DIR, "PNN_CIL_v2", f"Period_{period}")
+# ==== Paths ====
+stop_signal_file = "path/to/your/stop_signal_file.txt"
+model_saving_folder = "path/to/your/model_saving_folder"
+prev_model_path = "path/to/your/period2_best_model.pth"
 ensure_folder(model_saving_folder)
 
+# ==== Load Data ====
 X_train = np.load(os.path.join(save_dir, f"X_train_p{period}.npy"))
 y_train = np.load(os.path.join(save_dir, f"y_train_p{period}.npy"))
 X_val   = np.load(os.path.join(save_dir, f"X_test_p{period}.npy"))
 y_val   = np.load(os.path.join(save_dir, f"y_test_p{period}.npy"))
 
+# ==== Model Configuration ====
 device = auto_select_cuda_device()
 input_channels = X_train.shape[2]
 output_size = len(np.unique(y_train))
 new_output_size = 2
 
+# ==== Restore Previous PNN ====
 base_model = ResNet18_1D(input_channels=input_channels, output_size=2)
 prev_column = ECG_PNN_Column(input_dim=1024, output_dim=2, hidden_dim=512, dropout=0.2)
 frozen_model = ECG_ProgressiveNN(base_model=base_model, new_column=prev_column)
 
-prev_model_path = os.path.join(BASE_DIR, "PNN_CIL_v2", "Period_2", "ResNet18_PNN_best.pth")
 prev_checkpoint = torch.load(prev_model_path, map_location=device)
 frozen_model.load_state_dict(prev_checkpoint["model_state_dict"], strict=True)
 frozen_model.to(device)
 frozen_model.eval()
-for p in frozen_model.parameters():
-    p.requires_grad = False
+for param in frozen_model.parameters():
+    param.requires_grad = False
 
+# ==== Add New Column ====
 new_column = ECG_PNN_Column(input_dim=1024, output_dim=new_output_size, hidden_dim=512, dropout=0.2)
 model = ECG_ProgressiveNN(base_model=frozen_model, new_column=new_column).to(device)
 
+# ==== Training Config ====
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.new_column.parameters(), lr=1e-3, weight_decay=1e-5)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.9, patience=10)
+optimizer = torch.optim.Adam(model.new_column.parameters(), lr=1e-3, weight_decay=1e-5)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", factor=0.9, patience=10)
 
 train_with_pnn_ecg(
     model=model,
@@ -576,56 +583,59 @@ train_with_pnn_ecg(
     num_epochs=200,
     batch_size=64,
     model_saving_folder=model_saving_folder,
-    model_name="ResNet18_PNN",
+    model_name="pnn_period3",
     stop_signal_file=stop_signal_file,
     period=period,
     device=device
 )
 
-del X_train, y_train, X_val, y_val, base_model, prev_column, frozen_model, new_column, model
-gc.collect()
-torch.cuda.empty_cache()
 
-# ================================
-# 📌 Period 4: PNN Training
-# ================================
+# Period 4
 period = 4
 
-stop_signal_file = os.path.join(BASE_DIR, "stop_training.txt")
-model_saving_folder = os.path.join(BASE_DIR, "PNN_CIL_v2", f"Period_{period}")
+# ==== Paths ====
+stop_signal_file = "path/to/your/stop_signal_file.txt"
+model_saving_folder = "path/to/your/model_saving_folder"
+prev_model_path = "path/to/your/period3_best_model.pth"
 ensure_folder(model_saving_folder)
 
+# ==== Load Data ====
 X_train = np.load(os.path.join(save_dir, f"X_train_p{period}.npy"))
 y_train = np.load(os.path.join(save_dir, f"y_train_p{period}.npy"))
 X_val   = np.load(os.path.join(save_dir, f"X_test_p{period}.npy"))
 y_val   = np.load(os.path.join(save_dir, f"y_test_p{period}.npy"))
 
+# ==== Model Configuration ====
 device = auto_select_cuda_device()
 input_channels = X_train.shape[2]
 output_size = int(np.max(y_train)) + 1
 new_output_size = 4
 
+# ==== Step 1: Rebuild Period 2 Base ====
 base_model = ResNet18_1D(input_channels=input_channels, output_size=2)
-prev_column_2 = ECG_PNN_Column(input_dim=1024, output_dim=2, hidden_dim=512, dropout=0.2)
-frozen_step1 = ECG_ProgressiveNN(base_model=base_model, new_column=prev_column_2)
+column_2 = ECG_PNN_Column(input_dim=1024, output_dim=2, hidden_dim=512, dropout=0.2)
+frozen_step1 = ECG_ProgressiveNN(base_model=base_model, new_column=column_2)
 
-prev_column_3 = ECG_PNN_Column(input_dim=1024, output_dim=2, hidden_dim=512, dropout=0.2)
-frozen_step2 = ECG_ProgressiveNN(base_model=frozen_step1, new_column=prev_column_3)
+# ==== Step 2: Attach Period 3 Column ====
+column_3 = ECG_PNN_Column(input_dim=1024, output_dim=2, hidden_dim=512, dropout=0.2)
+frozen_step2 = ECG_ProgressiveNN(base_model=frozen_step1, new_column=column_3)
 
-prev_model_path = os.path.join(BASE_DIR, "PNN_CIL_v2", "Period_3", "ResNet18_PNN_best.pth")
+# ==== Load Period 3 Full Model ====
 prev_checkpoint = torch.load(prev_model_path, map_location=device)
 frozen_step2.load_state_dict(prev_checkpoint["model_state_dict"], strict=True)
 frozen_step2.to(device)
 frozen_step2.eval()
-for p in frozen_step2.parameters():
-    p.requires_grad = False
+for param in frozen_step2.parameters():
+    param.requires_grad = False
 
-new_column_4 = ECG_PNN_Column(input_dim=1024, output_dim=new_output_size, hidden_dim=512, dropout=0.2)
-model = ECG_ProgressiveNN(base_model=frozen_step2, new_column=new_column_4).to(device)
+# ==== Step 3: Add Period 4 Column ====
+column_4 = ECG_PNN_Column(input_dim=1024, output_dim=new_output_size, hidden_dim=512, dropout=0.2)
+model = ECG_ProgressiveNN(base_model=frozen_step2, new_column=column_4).to(device)
 
+# ==== Training Config ====
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.new_column.parameters(), lr=1e-3, weight_decay=1e-5)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.9, patience=10)
+optimizer = torch.optim.Adam(model.new_column.parameters(), lr=1e-3, weight_decay=1e-5)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", factor=0.9, patience=10)
 
 train_with_pnn_ecg(
     model=model,
@@ -640,14 +650,8 @@ train_with_pnn_ecg(
     num_epochs=200,
     batch_size=64,
     model_saving_folder=model_saving_folder,
-    model_name="ResNet18_PNN",
+    model_name="pnn_period4",
     stop_signal_file=stop_signal_file,
     period=period,
     device=device
 )
-
-del X_train, y_train, X_val, y_val
-del base_model, prev_column_2, prev_column_3, new_column_4
-del frozen_step1, frozen_step2, model
-gc.collect()
-torch.cuda.empty_cache()

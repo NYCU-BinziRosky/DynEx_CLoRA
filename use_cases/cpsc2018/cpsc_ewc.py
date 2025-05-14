@@ -435,22 +435,130 @@ def train_with_ewc_ecg(
     gc.collect()
 
 
+# Period 1
+period = 1
 
-# ==========================================
-# 🚨 Note:
-# Period 1 model is trained independently and shared across all methods.
-# Please ensure it is saved beforehand and correctly referenced here.
-# ==========================================
+# ==== Paths ====
+stop_signal_file = "path/to/your/stop_signal_file.txt"
+model_saving_folder = "path/to/your/model_saving_folder"
+ensure_folder(model_saving_folder)
+
+# ==== Load Data ====
+X_train = np.load(os.path.join(save_dir, f"X_train_p{period}.npy"))
+y_train = np.load(os.path.join(save_dir, f"y_train_p{period}.npy"))
+X_val   = np.load(os.path.join(save_dir, f"X_test_p{period}.npy"))
+y_val   = np.load(os.path.join(save_dir, f"y_test_p{period}.npy"))
+
+# ==== Model & Training Config ====
+input_channels = X_train.shape[2]
+output_size    = len(np.unique(y_train))
+device         = auto_select_cuda_device()
+
+model     = ResNet18_1D(input_channels=input_channels, output_size=output_size).to(device)
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.9, patience=10)
+
+# ==== Train ====
+train_with_ewc_ecg(
+    model=model,
+    output_size=output_size,
+    criterion=criterion,
+    optimizer=optimizer,
+    X_train=X_train,
+    y_train=y_train,
+    X_val=X_val,
+    y_val=y_val,
+    scheduler=scheduler,
+    num_epochs=200,
+    batch_size=64,
+    model_saving_folder=model_saving_folder,
+    model_name="ewc_period1",
+    stop_signal_file=stop_signal_file,
+    ewc=None,
+    lambda_ewc=0.0,
+    device=device
+)
+
+# ==== Cleanup ====
+torch.cuda.empty_cache()
+gc.collect()
 
 
-# ================================
-# 📌 Period 2: EWC Training (Protect Period 1)
-# ================================
+# Period 2
 period = 2
 
 # ==== Paths ====
-stop_signal_file = os.path.join(BASE_DIR, "stop_training.txt")
-model_saving_folder = os.path.join(BASE_DIR, "EWC_CIL", f"Period_{period}")
+stop_signal_file = "path/to/your/stop_signal_file.txt"
+model_saving_folder = "path/to/your/model_saving_folder"
+prev_model_path = "path/to/your/period1_best_model.pth"
+ensure_folder(model_saving_folder)
+
+# ==== Load Data ====
+X_train = np.load(os.path.join(save_dir, f"X_train_p{period}.npy"))
+y_train = np.load(os.path.join(save_dir, f"y_train_p{period}.npy"))
+X_val   = np.load(os.path.join(save_dir, f"X_test_p{period}.npy"))
+y_val   = np.load(os.path.join(save_dir, f"y_test_p{period}.npy"))
+
+# ==== Model & Training Config ====
+device = auto_select_cuda_device()
+
+# ==== Model ====
+input_channels = X_train.shape[2]
+output_size    = len(np.unique(y_train))
+model = ResNet18_1D(input_channels=input_channels, output_size=output_size).to(device)
+
+# ==== Load Previous Model Weights ====
+prev_checkpoint = torch.load(prev_model_path, map_location=device)
+state_dict = prev_checkpoint["model_state_dict"]
+model_dict = model.state_dict()
+filtered_dict = {k: v for k, v in state_dict.items() if k in model_dict and model_dict[k].shape == v.shape}
+model.load_state_dict(filtered_dict, strict=False)
+
+# ==== EWC Preparation ====
+X_prev = np.load(os.path.join(save_dir, f"X_train_p{period-1}.npy"))
+y_prev = np.load(os.path.join(save_dir, f"y_train_p{period-1}.npy"))
+train_loader_prev = DataLoader(
+    TensorDataset(torch.tensor(X_prev, dtype=torch.float32), torch.tensor(y_prev, dtype=torch.long)),
+    batch_size=64, shuffle=True
+)
+criterion = nn.CrossEntropyLoss()
+fisher_dict, params_dict = EWC.compute_fisher_and_params(model, train_loader_prev, criterion, device=device)
+ewc_state = EWC(fisher=fisher_dict, params=params_dict)
+
+# ==== Optimizer / Scheduler ====
+optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.9, patience=10)
+
+# ==== Training ====
+train_with_ewc_ecg(
+    model=model,
+    output_size=output_size,
+    criterion=criterion,
+    optimizer=optimizer,
+    X_train=X_train,
+    y_train=y_train,
+    X_val=X_val,
+    y_val=y_val,
+    scheduler=scheduler,
+    num_epochs=200,
+    batch_size=64,
+    model_saving_folder=model_saving_folder,
+    model_name="ewc_period2",
+    stop_signal_file=stop_signal_file,
+    ewc=ewc_state,
+    lambda_ewc=1.0,
+    device=device
+)
+
+
+# Period 3
+period = 3
+
+# ==== Paths ====
+stop_signal_file = "path/to/your/stop_signal_file.txt"
+model_saving_folder = "path/to/your/model_saving_folder"
+prev_model_path = "path/to/your/period2_best_model.pth"
 ensure_folder(model_saving_folder)
 
 # ==== Load Data ====
@@ -462,35 +570,34 @@ y_val   = np.load(os.path.join(save_dir, f"y_test_p{period}.npy"))
 # ==== Device ====
 device = auto_select_cuda_device()
 
-# ==== Model Setup ====
+# ==== Model ====
 input_channels = X_train.shape[2]
-output_size = len(np.unique(y_train))
+output_size    = len(np.unique(y_train))
 model = ResNet18_1D(input_channels=input_channels, output_size=output_size).to(device)
 
-# ==== Load Pretrained Period 1 Model ====
-prev_model_path = "path/to/your/period1_best_model.pth"
+# ==== Load Previous Model Weights ====
 prev_checkpoint = torch.load(prev_model_path, map_location=device)
 state_dict = prev_checkpoint["model_state_dict"]
 model_dict = model.state_dict()
 filtered_dict = {k: v for k, v in state_dict.items() if k in model_dict and model_dict[k].shape == v.shape}
 model.load_state_dict(filtered_dict, strict=False)
 
-# ==== Prepare EWC State (from Period 1) ====
-X_prev = np.load(os.path.join(save_dir, "X_train_p1.npy"))
-y_prev = np.load(os.path.join(save_dir, "y_train_p1.npy"))
+# ==== EWC Preparation ====
+X_prev = np.load(os.path.join(save_dir, f"X_train_p{period-1}.npy"))
+y_prev = np.load(os.path.join(save_dir, f"y_train_p{period-1}.npy"))
 train_loader_prev = DataLoader(
     TensorDataset(torch.tensor(X_prev, dtype=torch.float32), torch.tensor(y_prev, dtype=torch.long)),
     batch_size=64, shuffle=True
 )
-
 criterion = nn.CrossEntropyLoss()
 fisher_dict, params_dict = EWC.compute_fisher_and_params(model, train_loader_prev, criterion, device=device)
 ewc_state = EWC(fisher=fisher_dict, params=params_dict)
+
+# ==== Optimizer / Scheduler ====
+optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.9, patience=10)
 
 # ==== Training ====
-optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=10)
-
 train_with_ewc_ecg(
     model=model,
     output_size=output_size,
@@ -504,124 +611,60 @@ train_with_ewc_ecg(
     num_epochs=200,
     batch_size=64,
     model_saving_folder=model_saving_folder,
-    model_name="ResNet18_1D",
+    model_name="ewc_period3",
     stop_signal_file=stop_signal_file,
     ewc=ewc_state,
     lambda_ewc=1.0,
     device=device
 )
 
-# ==== Cleanup ====
-del model, train_loader_prev, fisher_dict, params_dict
-gc.collect()
-torch.cuda.empty_cache()
 
-
-# ================================
-# 📌 Period 3: EWC Training (Protect Period 2)
-# ================================
-period = 3
-
-stop_signal_file = os.path.join(BASE_DIR, "stop_training.txt")
-model_saving_folder = os.path.join(BASE_DIR, "EWC_CIL", f"Period_{period}")
-ensure_folder(model_saving_folder)
-
-X_train = np.load(os.path.join(save_dir, f"X_train_p{period}.npy"))
-y_train = np.load(os.path.join(save_dir, f"y_train_p{period}.npy"))
-X_val   = np.load(os.path.join(save_dir, f"X_test_p{period}.npy"))
-y_val   = np.load(os.path.join(save_dir, f"y_test_p{period}.npy"))
-
-device = auto_select_cuda_device()
-input_channels = X_train.shape[2]
-output_size = len(np.unique(y_train))
-model = ResNet18_1D(input_channels=input_channels, output_size=output_size).to(device)
-
-prev_model_path = os.path.join(BASE_DIR, "EWC_CIL", "Period_2", "ResNet18_1D_best.pth")
-prev_checkpoint = torch.load(prev_model_path, map_location=device)
-state_dict = prev_checkpoint["model_state_dict"]
-model_dict = model.state_dict()
-filtered_dict = {k: v for k, v in state_dict.items() if k in model_dict and model_dict[k].shape == v.shape}
-model.load_state_dict(filtered_dict, strict=False)
-
-X_prev = np.load(os.path.join(save_dir, "X_train_p2.npy"))
-y_prev = np.load(os.path.join(save_dir, "y_train_p2.npy"))
-train_loader_prev = DataLoader(
-    TensorDataset(torch.tensor(X_prev, dtype=torch.float32), torch.tensor(y_prev, dtype=torch.long)),
-    batch_size=64, shuffle=True
-)
-
-criterion = nn.CrossEntropyLoss()
-fisher_dict, params_dict = EWC.compute_fisher_and_params(model, train_loader_prev, criterion, device=device)
-ewc_state = EWC(fisher=fisher_dict, params=params_dict)
-
-optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=10)
-
-train_with_ewc_ecg(
-    model=model,
-    output_size=output_size,
-    criterion=criterion,
-    optimizer=optimizer,
-    X_train=X_train,
-    y_train=y_train,
-    X_val=X_val,
-    y_val=y_val,
-    scheduler=scheduler,
-    num_epochs=200,
-    batch_size=64,
-    model_saving_folder=model_saving_folder,
-    model_name="ResNet18_1D",
-    stop_signal_file=stop_signal_file,
-    ewc=ewc_state,
-    lambda_ewc=1.0,
-    device=device
-)
-
-del model, train_loader_prev, fisher_dict, params_dict
-gc.collect()
-torch.cuda.empty_cache()
-
-
-# ================================
-# 📌 Period 4: EWC Training (Protect Period 3)
-# ================================
+# Period 4
 period = 4
 
-stop_signal_file = os.path.join(BASE_DIR, "stop_training.txt")
-model_saving_folder = os.path.join(BASE_DIR, "EWC_CIL", f"Period_{period}")
+# ==== Paths ====
+stop_signal_file = "path/to/your/stop_signal_file.txt"
+model_saving_folder = "path/to/your/model_saving_folder"
+prev_model_path = "path/to/your/period3_best_model.pth"
 ensure_folder(model_saving_folder)
 
+# ==== Load Data ====
 X_train = np.load(os.path.join(save_dir, f"X_train_p{period}.npy"))
 y_train = np.load(os.path.join(save_dir, f"y_train_p{period}.npy"))
 X_val   = np.load(os.path.join(save_dir, f"X_test_p{period}.npy"))
 y_val   = np.load(os.path.join(save_dir, f"y_test_p{period}.npy"))
 
+# ==== Device ====
 device = auto_select_cuda_device()
+
+# ==== Model ====
 input_channels = X_train.shape[2]
-output_size = int(np.max(y_train)) + 1  # Avoid class indexing issues
+output_size    = int(np.max(y_train)) + 1  # handle missing class IDs
 model = ResNet18_1D(input_channels=input_channels, output_size=output_size).to(device)
 
-prev_model_path = os.path.join(BASE_DIR, "EWC_CIL", "Period_3", "ResNet18_1D_best.pth")
+# ==== Load Previous Model Weights ====
 prev_checkpoint = torch.load(prev_model_path, map_location=device)
 state_dict = prev_checkpoint["model_state_dict"]
 model_dict = model.state_dict()
 filtered_dict = {k: v for k, v in state_dict.items() if k in model_dict and model_dict[k].shape == v.shape}
 model.load_state_dict(filtered_dict, strict=False)
 
-X_prev = np.load(os.path.join(save_dir, "X_train_p3.npy"))
-y_prev = np.load(os.path.join(save_dir, "y_train_p3.npy"))
+# ==== EWC Preparation ====
+X_prev = np.load(os.path.join(save_dir, f"X_train_p{period-1}.npy"))
+y_prev = np.load(os.path.join(save_dir, f"y_train_p{period-1}.npy"))
 train_loader_prev = DataLoader(
     TensorDataset(torch.tensor(X_prev, dtype=torch.float32), torch.tensor(y_prev, dtype=torch.long)),
     batch_size=64, shuffle=True
 )
-
 criterion = nn.CrossEntropyLoss()
 fisher_dict, params_dict = EWC.compute_fisher_and_params(model, train_loader_prev, criterion, device=device)
 ewc_state = EWC(fisher=fisher_dict, params=params_dict)
 
+# ==== Optimizer / Scheduler ====
 optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=10)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.9, patience=10)
 
+# ==== Training ====
 train_with_ewc_ecg(
     model=model,
     output_size=output_size,
@@ -635,13 +678,10 @@ train_with_ewc_ecg(
     num_epochs=200,
     batch_size=64,
     model_saving_folder=model_saving_folder,
-    model_name="ResNet18_1D",
+    model_name="ewc_period4",
     stop_signal_file=stop_signal_file,
     ewc=ewc_state,
     lambda_ewc=1.0,
     device=device
 )
 
-del model, train_loader_prev, fisher_dict, params_dict
-gc.collect()
-torch.cuda.empty_cache()

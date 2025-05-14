@@ -446,19 +446,20 @@ def train_with_lora_ecg(
 
 # ==========================================
 # 🚨 Note:
-# Period 1 model is trained independently and shared across all methods.
-# Please ensure it is saved beforehand and correctly referenced here.
+# Period 1 model is shared across all methods.
+# You may reuse the one trained in `cpsc_ewc.py`,
+# or train it using the current method's training function
+# (as long as the model architecture is consistent).
 # ==========================================
 
 
-# ================================
-# 📌 Period 2: Standard LoRA Training (Protect Period 1)
-# ================================
+# Period 2
 period = 2
 
 # ==== Paths ====
-stop_signal_file = os.path.join(BASE_DIR, "stop_training.txt")
-model_saving_folder = os.path.join(BASE_DIR, "your_folder_here", f"Period_{period}")
+stop_signal_file = "path/to/your/stop_signal_file.txt"
+model_saving_folder = "path/to/your/model_saving_folder"
+prev_model_path = "path/to/your/period1_best_model.pth"
 ensure_folder(model_saving_folder)
 
 # ==== Load Data ====
@@ -467,33 +468,26 @@ y_train = np.load(os.path.join(save_dir, f"y_train_p{period}.npy"))
 X_val   = np.load(os.path.join(save_dir, f"X_test_p{period}.npy"))
 y_val   = np.load(os.path.join(save_dir, f"y_test_p{period}.npy"))
 
-# ==== Device ====
+# ==== Device & Model ====
 device = auto_select_cuda_device()
-
-# ==== Model ====
 input_channels = X_train.shape[2]
 output_size = len(np.unique(y_train))
 model = ResNet18_1D_LoRA(input_channels=input_channels, output_size=output_size, lora_rank=4).to(device)
 
-# ==== Load Pretrained Period 1 Model (excluding FC) ====
-prev_model_path = "your_period1_model.pth"
-prev_checkpoint = torch.load(prev_model_path, map_location=device)
-prev_state_dict = prev_checkpoint["model_state_dict"]
+# ==== Load Previous Weights (excluding FC) ====
+checkpoint = torch.load(prev_model_path, map_location=device)
 model_dict = model.state_dict()
-filtered_state_dict = {
-    k: v for k, v in prev_state_dict.items()
+filtered = {
+    k: v for k, v in checkpoint["model_state_dict"].items()
     if k in model_dict and model_dict[k].shape == v.shape and not k.startswith("fc")
 }
-model.load_state_dict(filtered_state_dict, strict=False)
-print("✅ Period 1 weights loaded (FC excluded)")
-
-# ==== Init LoRA ====
+model.load_state_dict(filtered, strict=False)
 model.init_lora()
 
-# ==== Training ====
+# ==== Optimizer & Training ====
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.get_trainable_parameters(), lr=1e-3, weight_decay=1e-5)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=10)
+optimizer = torch.optim.Adam(model.get_trainable_parameters(), lr=1e-3, weight_decay=1e-5)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", factor=0.9, patience=10)
 
 train_with_lora_ecg(
     model=model,
@@ -508,52 +502,49 @@ train_with_lora_ecg(
     num_epochs=200,
     batch_size=64,
     model_saving_folder=model_saving_folder,
-    model_name="ResNet18_1D_LoRA",
+    model_name="lora_period2",
     stop_signal_file=stop_signal_file,
     device=device
 )
 
-del model, prev_checkpoint, prev_state_dict, filtered_state_dict
-gc.collect()
-torch.cuda.empty_cache()
 
-# ================================
-# 📌 Period 3: Standard LoRA Training (Protect Period 2)
-# ================================
+# Period 3
 period = 3
 
-stop_signal_file = os.path.join(BASE_DIR, "stop_training.txt")
-model_saving_folder = os.path.join(BASE_DIR, "your_folder_here", f"Period_{period}")
+# ==== Paths ====
+stop_signal_file = "path/to/your/stop_signal_file.txt"
+model_saving_folder = "path/to/your/model_saving_folder"
+prev_model_path = "path/to/your/period2_best_model.pth"
 ensure_folder(model_saving_folder)
 
+# ==== Load Data ====
 X_train = np.load(os.path.join(save_dir, f"X_train_p{period}.npy"))
 y_train = np.load(os.path.join(save_dir, f"y_train_p{period}.npy"))
 X_val   = np.load(os.path.join(save_dir, f"X_test_p{period}.npy"))
 y_val   = np.load(os.path.join(save_dir, f"y_test_p{period}.npy"))
 
+# ==== Device & Model ====
 device = auto_select_cuda_device()
 input_channels = X_train.shape[2]
 output_size = len(np.unique(y_train))
 model = ResNet18_1D_LoRA(input_channels=input_channels, output_size=output_size, lora_rank=4).to(device)
-
 model.init_lora()
 
-prev_model_path = "your_period2_model.pth"
-prev_checkpoint = torch.load(prev_model_path, map_location=device)
-prev_state_dict = prev_checkpoint["model_state_dict"]
+# ==== Load Previous Weights (excluding FC & LoRA) ====
+checkpoint = torch.load(prev_model_path, map_location=device)
 model_dict = model.state_dict()
-filtered_state_dict = {
-    k: v for k, v in prev_state_dict.items()
+filtered = {
+    k: v for k, v in checkpoint["model_state_dict"].items()
     if k in model_dict and model_dict[k].shape == v.shape and not (
         k.startswith("fc") or "lora_adapter.lora_A" in k or "lora_adapter.lora_B" in k
     )
 }
-model.load_state_dict(filtered_state_dict, strict=False)
-print("✅ Period 2 weights loaded (excluding FC and LoRA A/B)")
+model.load_state_dict(filtered, strict=False)
 
+# ==== Optimizer & Training ====
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.get_trainable_parameters(), lr=1e-3, weight_decay=1e-5)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=10)
+optimizer = torch.optim.Adam(model.get_trainable_parameters(), lr=1e-3, weight_decay=1e-5)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", factor=0.9, patience=10)
 
 train_with_lora_ecg(
     model=model,
@@ -568,52 +559,49 @@ train_with_lora_ecg(
     num_epochs=200,
     batch_size=64,
     model_saving_folder=model_saving_folder,
-    model_name="ResNet18_1D_LoRA",
+    model_name="lora_period3",
     stop_signal_file=stop_signal_file,
     device=device
 )
 
-del model, prev_checkpoint, prev_state_dict, filtered_state_dict
-gc.collect()
-torch.cuda.empty_cache()
 
-# ================================
-# 📌 Period 4: Standard LoRA Training (Protect Period 3)
-# ================================
+# Period 4
 period = 4
 
-stop_signal_file = os.path.join(BASE_DIR, "stop_training.txt")
-model_saving_folder = os.path.join(BASE_DIR, "your_folder_here", f"Period_{period}")
+# ==== Paths ====
+stop_signal_file = "path/to/your/stop_signal_file.txt"
+model_saving_folder = "path/to/your/model_saving_folder"
+prev_model_path = "path/to/your/period3_best_model.pth"
 ensure_folder(model_saving_folder)
 
+# ==== Load Data ====
 X_train = np.load(os.path.join(save_dir, f"X_train_p{period}.npy"))
 y_train = np.load(os.path.join(save_dir, f"y_train_p{period}.npy"))
 X_val   = np.load(os.path.join(save_dir, f"X_test_p{period}.npy"))
 y_val   = np.load(os.path.join(save_dir, f"y_test_p{period}.npy"))
 
+# ==== Device & Model ====
 device = auto_select_cuda_device()
 input_channels = X_train.shape[2]
 output_size = int(np.max(y_train)) + 1
 model = ResNet18_1D_LoRA(input_channels=input_channels, output_size=output_size, lora_rank=4).to(device)
-
 model.init_lora()
 
-prev_model_path = "your_period3_model.pth"
-prev_checkpoint = torch.load(prev_model_path, map_location=device)
-prev_state_dict = prev_checkpoint["model_state_dict"]
+# ==== Load Previous Weights (excluding FC & LoRA) ====
+checkpoint = torch.load(prev_model_path, map_location=device)
 model_dict = model.state_dict()
-filtered_state_dict = {
-    k: v for k, v in prev_state_dict.items()
+filtered = {
+    k: v for k, v in checkpoint["model_state_dict"].items()
     if k in model_dict and model_dict[k].shape == v.shape and not (
         k.startswith("fc") or "lora_adapter.lora_A" in k or "lora_adapter.lora_B" in k
     )
 }
-model.load_state_dict(filtered_state_dict, strict=False)
-print("✅ Period 3 weights loaded (excluding FC and LoRA A/B)")
+model.load_state_dict(filtered, strict=False)
 
+# ==== Optimizer & Training ====
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.get_trainable_parameters(), lr=1e-3, weight_decay=1e-5)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=10)
+optimizer = torch.optim.Adam(model.get_trainable_parameters(), lr=1e-3, weight_decay=1e-5)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", factor=0.9, patience=10)
 
 train_with_lora_ecg(
     model=model,
@@ -628,11 +616,7 @@ train_with_lora_ecg(
     num_epochs=200,
     batch_size=64,
     model_saving_folder=model_saving_folder,
-    model_name="ResNet18_1D_LoRA",
+    model_name="lora_period4",
     stop_signal_file=stop_signal_file,
     device=device
 )
-
-del model, prev_checkpoint, prev_state_dict, filtered_state_dict
-gc.collect()
-torch.cuda.empty_cache()

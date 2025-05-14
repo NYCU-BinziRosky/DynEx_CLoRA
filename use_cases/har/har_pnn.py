@@ -21,18 +21,16 @@ from scipy.ndimage import gaussian_filter1d
 from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
 
-# === Set working directory manually if needed ===
-# (This should point to your own project directory)
+# Set working directory
 Working_directory = os.path.normpath("path/to/your/project")
 os.chdir(Working_directory)
 
-# === Define base folder paths for HAR dataset ===
-# Replace with your actual dataset folder structure
+# Define base folder paths for HAR dataset
 BASE_DIR = "path/to/your/har_dataset"
 TRAIN_DIR = os.path.join(BASE_DIR, "train")
 TEST_DIR = os.path.join(BASE_DIR, "test")
 
-# === Human Activity label mapping (UCI HAR original labels) ===
+# Human Activity label mapping (UCI HAR original labels)
 activity_label_map = {
     1: "WALKING",
     2: "WALKING_UPSTAIRS",
@@ -42,22 +40,21 @@ activity_label_map = {
     6: "LAYING"
 }
 
-# === Load feature and label data ===
-# You must place preprocessed txt files under your specified directory
+# Load feature and label data
 X_train = np.loadtxt(os.path.join(TRAIN_DIR, "X_train.txt"))
 y_train = np.loadtxt(os.path.join(TRAIN_DIR, "y_train.txt")).astype(int)
 X_test = np.loadtxt(os.path.join(TEST_DIR, "X_test.txt"))
 y_test = np.loadtxt(os.path.join(TEST_DIR, "y_test.txt")).astype(int)
 
-# === Define label composition for each continual learning period ===
+# Period-to-original-label mapping
 period_label_map = {
     1: [4, 5],           # SITTING, STANDING
-    2: [4, 5, 1, 2, 3],  # Add merged WALKING
-    3: [4, 5, 1, 2, 3, 6],  # Add LAYING
-    4: [4, 5, 1, 2, 3, 6]   # Final: split walking variants
+    2: [4, 5, 1, 2, 3],  # + WALKING variants (merged)
+    3: [4, 5, 1, 2, 3, 6],  # + LAYING
+    4: [4, 5, 1, 2, 3, 6]   # same classes, but with walking variants separated
 }
 
-# === Define final consistent label IDs for training across all periods ===
+# Consistent label remapping across all periods (final label index)
 final_class_map = {
     "SITTING": 0,
     "STANDING": 1,
@@ -67,11 +64,11 @@ final_class_map = {
     "WALKING_DOWNSTAIRS": 5
 }
 
-# === Reverse mapping: ID to label string ===
+# Reverse mapping for readability
 label_name_from_id = {v: k for k, v in final_class_map.items()}
 
 
-# === Convert raw label to remapped label for a specific period ===
+# Convert raw label to remapped label for a specific period
 def map_label(label, period):
     name = activity_label_map[label]
     if period < 4:
@@ -83,7 +80,7 @@ def map_label(label, period):
         return final_class_map[name]
 
 
-# === Filter dataset by period and remap labels accordingly ===
+# Filter dataset by period and remap labels accordingly
 def get_period_dataset(X, y, period):
     allowed_labels = period_label_map[period]
     mask = np.isin(y, allowed_labels)
@@ -92,7 +89,7 @@ def get_period_dataset(X, y, period):
     return Xp, yp
 
 
-# === Utility: Print class distribution for diagnostics ===
+# Print class distribution for diagnostics
 def print_class_distribution(y, var_name: str, label_map: dict) -> None:
     y = np.array(y).flatten()
     unique, counts = np.unique(y, return_counts=True)
@@ -102,7 +99,7 @@ def print_class_distribution(y, var_name: str, label_map: dict) -> None:
         print(f"  ├─ Label {i:<2} ({label_map[i]:<20}) → {c:>5} samples ({(c/total)*100:>5.2f}%)")
 
 
-# === Generate remapped dataset for each period ===
+# Generate remapped dataset for each period
 period_datasets = {}
 
 for period in range(1, 5):
@@ -117,15 +114,12 @@ for period in range(1, 5):
     print_class_distribution(yp_train, f"Period {period} (Train)", label_name_from_id)
     print_class_distribution(yp_test, f"Period {period} (Test)", label_name_from_id)
 
-
-# === GPU device selection (auto detect least memory usage) ===
+# CUDA device auto-selection
 def auto_select_cuda_device(verbose=True):
-    """
-    Automatically selects the CUDA GPU with the least memory usage.
-    Falls back to CPU if no GPU is available.
-    """
+    """Automatically select the least-used CUDA device, or fallback to CPU."""
     if not torch.cuda.is_available():
-        print("🚫 No CUDA GPU available. Using CPU.")
+        if verbose:
+            print("⚠️ No CUDA device available. Using CPU.")
         return torch.device("cpu")
 
     try:
@@ -135,23 +129,15 @@ def auto_select_cuda_device(verbose=True):
         )
         memory_used = [int(x) for x in smi_output.strip().split('\n')]
         best_gpu = int(np.argmin(memory_used))
-
         if verbose:
-            print("🎯 Automatically selected GPU:")
-            print(f"    - CUDA Device ID : {best_gpu}")
-            print(f"    - Memory Used    : {memory_used[best_gpu]} MiB")
-            print(f"    - Device Name    : {torch.cuda.get_device_name(best_gpu)}")
+            print(f"🎯 Auto-selected GPU: {best_gpu} ({memory_used[best_gpu]} MiB used)")
         return torch.device(f"cuda:{best_gpu}")
     except Exception as e:
-        print(f"⚠️ Failed to auto-detect GPU. Falling back to cuda:0. ({e})")
+        if verbose:
+            print(f"⚠️ GPU detection failed. Falling back to cuda:0 ({e})")
         return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-
-# === Device assignment ===
-device = auto_select_cuda_device()
-
-
-# === Per-class accuracy computation ===
+# Utility Function
 def compute_classwise_accuracy(preds, targets, class_correct, class_total):
     """
     Computes per-class accuracy statistics from raw logits and ground truth labels.
@@ -170,8 +156,6 @@ def compute_classwise_accuracy(preds, targets, class_correct, class_total):
         class_total[label] = class_total.get(label, 0) + label_mask.sum().item()
         class_correct[label] = class_correct.get(label, 0) + (correct_mask & label_mask).sum().item()
 
-
-# === Forward Transfer (FWT) computation for HAR ===
 def compute_fwt_har(previous_model, init_model, X_val, y_val, known_classes, batch_size=64):
     """
     Computes Forward Transfer (FWT) for tabular HAR models (e.g., MLPs).
@@ -228,16 +212,8 @@ def compute_fwt_har(previous_model, init_model, X_val, y_val, known_classes, bat
     acc_init = correct_init / total
     fwt_value = acc_prev - acc_init
 
-    print(f"\n### 🔍 FWT Debug Info (HAR):")
-    print(f"- Total evaluated samples: {total}")
-    print(f"- Correct (PrevModel): {correct_prev} / {total} → Acc = {acc_prev:.4f}")
-    print(f"- Correct (InitModel): {correct_init} / {total} → Acc = {acc_init:.4f}")
-    print(f"- FWT = Acc_prev - Acc_init = {fwt_value:.4f}")
-
     return fwt_value, acc_prev, acc_init
 
-
-# === Utility: print total parameters and estimated model size ===
 def print_model_info(model):
     """
     Prints total number of parameters and estimated model size in MB.
@@ -252,7 +228,7 @@ def print_model_info(model):
     print(f"- Total Parameters: {total_params}")
     print(f"- Model Size (float32): {param_size_MB:.2f} MB")
 
-
+# Model
 class HAR_MLP_v2(nn.Module):
     """
     A deeper MLP model for Human Activity Recognition (HAR) classification.
@@ -398,38 +374,50 @@ class ProgressiveNeuralNetwork_fc2(nn.Module):
         new_logits = self.new_column(x, lateral_features=base_features)
         return torch.cat([base_logits, new_logits], dim=-1)
 
-
-def train_with_pnn(model, output_size, criterion, optimizer,
-                   X_train, y_train, X_val, y_val,
-                   scheduler=None, num_epochs=10, batch_size=64,
-                   model_saving_folder=None, model_name=None,
-                   stop_signal_file=None, device=auto_select_cuda_device()):
+# Training Function
+def train_with_pnn(
+    model,
+    output_size,
+    criterion,
+    optimizer,
+    X_train,
+    y_train,
+    X_val,
+    y_val,
+    scheduler=None,
+    num_epochs=10,
+    batch_size=64,
+    model_saving_folder=None,
+    model_name=None,
+    stop_signal_file=None,
+    device=None
+):
     """
-    General training loop for Progressive Neural Network (PNN).
+    HAR training loop for Progressive Neural Networks (PNN).
 
-    Args:
-        model (nn.Module): PNN model instance with frozen base + new column.
-        output_size (int): Total number of output classes (base + new).
-        criterion (Loss): Classification loss function.
-        optimizer (Optimizer): Optimizer for the new column parameters.
-        X_train, y_train, X_val, y_val (np.ndarray): Training/Validation data.
+    Arguments:
+        model (nn.Module): ProgressiveNN instance with base frozen, new column trainable.
+        output_size (int): Number of output classes.
+        criterion (Loss): Loss function.
+        optimizer (Optimizer): Optimizer instance.
+        X_train, y_train: Training data (numpy arrays).
+        X_val, y_val: Validation data (numpy arrays).
         scheduler (optional): Learning rate scheduler.
         num_epochs (int): Number of training epochs.
-        batch_size (int): Batch size.
-        model_saving_folder (str): Folder to save models.
-        model_name (str): Prefix name for saved models.
-        stop_signal_file (str): File path to stop training early.
-        device (torch.device): Computation device (default: auto-detected).
+        batch_size (int): Mini-batch size.
+        model_saving_folder (str, optional): Output folder to save best model.
+        model_name (str, optional): Prefix for model file name.
+        stop_signal_file (str, optional): Path to stop signal file.
+        device (torch.device, optional): Device to train on.
     """
-    model_name = model_name or 'pnn_model'
-    model_saving_folder = model_saving_folder or './saved_models'
-
-    if model_saving_folder:
-        if os.path.exists(model_saving_folder):
-            shutil.rmtree(model_saving_folder)
-        os.makedirs(model_saving_folder, exist_ok=True)
+    device = device or auto_select_cuda_device()
+    model_name = model_name or "model"
+    model_saving_folder = model_saving_folder or "./saved_models"
+    os.makedirs(model_saving_folder, exist_ok=True)
+    best_model_path = os.path.join(model_saving_folder, f"{model_name}_best.pth")
 
     model.to(device)
+
     X_train = torch.tensor(X_train, dtype=torch.float32).to(device)
     y_train = torch.tensor(y_train, dtype=torch.long).to(device)
     X_val = torch.tensor(X_val, dtype=torch.float32).to(device)
@@ -438,7 +426,9 @@ def train_with_pnn(model, output_size, criterion, optimizer,
     train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=batch_size, shuffle=False)
 
-    best_results = []
+    best_val_acc = 0.0
+    best_record = None
+
     for epoch in range(num_epochs):
         if stop_signal_file and os.path.exists(stop_signal_file):
             break
@@ -452,20 +442,23 @@ def train_with_pnn(model, output_size, criterion, optimizer,
             outputs = model(X_batch).view(-1, output_size)
             y_batch = y_batch.view(-1)
             loss = criterion(outputs, y_batch)
-            compute_classwise_accuracy(outputs, y_batch, class_correct, class_total)
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item() * X_batch.size(0)
+            compute_classwise_accuracy(outputs, y_batch, class_correct, class_total)
 
         train_loss = epoch_loss / len(train_loader.dataset)
         train_acc = {
-            int(c): f"{(class_correct[c] / class_total[c]) * 100:.2f}%" if class_total[c] > 0 else "0.00%"
+            int(c): f"{(class_correct[c] / class_total[c]) * 100:.2f}%"
+            if class_total[c] > 0 else "0.00%"
             for c in sorted(class_total.keys())
         }
 
+        # === Validation ===
         model.eval()
         val_loss, val_correct, val_total = 0.0, 0, 0
         val_class_correct, val_class_total = {}, {}
+
         with torch.no_grad():
             for X_batch, y_batch in val_loader:
                 outputs = model(X_batch).view(-1, output_size)
@@ -479,46 +472,34 @@ def train_with_pnn(model, output_size, criterion, optimizer,
         val_loss /= len(val_loader.dataset)
         val_acc = val_correct / val_total
         val_acc_cls = {
-            int(c): f"{(val_class_correct[c] / val_class_total[c]) * 100:.2f}%" if val_class_total[c] > 0 else "0.00%"
+            int(c): f"{(val_class_correct[c] / val_class_total[c]) * 100:.2f}%"
+            if val_class_total[c] > 0 else "0.00%"
             for c in sorted(val_class_total.keys())
         }
 
-        model_path = os.path.join(model_saving_folder, f"{model_name}_epoch_{epoch+1}.pth")
+        print(f"[Epoch {epoch+1:03d}/{num_epochs}] Train Loss: {train_loss:.4f} | Val Acc: {val_acc:.2%}")
+
         current = {
-            'epoch': epoch + 1,
-            'train_loss': train_loss,
-            'val_loss': val_loss,
-            'val_accuracy': val_acc,
-            'train_classwise_accuracy': train_acc,
-            'val_classwise_accuracy': val_acc_cls,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'learning_rate': optimizer.param_groups[0]['lr'],
-            'model_path': model_path
+            "epoch": epoch + 1,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "val_accuracy": val_acc,
+            "train_classwise_accuracy": train_acc,
+            "val_classwise_accuracy": val_acc_cls,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "learning_rate": optimizer.param_groups[0]["lr"],
+            "model_path": best_model_path,
         }
 
-        if len(best_results) < 5 or val_acc > best_results[-1]['val_accuracy']:
-            if len(best_results) == 5:
-                to_remove = best_results.pop()
-                if os.path.exists(to_remove['model_path']):
-                    os.remove(to_remove['model_path'])
-            best_results.append(current)
-            best_results.sort(key=lambda x: (x['val_accuracy'], x['epoch']), reverse=True)
-            torch.save(current, model_path)
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_record = current
+            torch.save(current, best_model_path)
 
         if scheduler:
             scheduler.step(val_loss)
 
-    # Save final and best models
-    final_model_path = os.path.join(model_saving_folder, f"{model_name}_final.pth")
-    torch.save(current, final_model_path)
-
-    if best_results:
-        best_model = best_results[0]
-        best_model_path = os.path.join(model_saving_folder, f"{model_name}_best.pth")
-        torch.save(best_model, best_model_path)
-
-    del X_train, y_train, X_val, y_val, train_loader, val_loader
     torch.cuda.empty_cache()
     gc.collect()
 
