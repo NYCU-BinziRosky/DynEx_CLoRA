@@ -114,6 +114,10 @@ for period in range(1, 5):
     print_class_distribution(yp_train, f"Period {period} (Train)", label_name_from_id)
     print_class_distribution(yp_test, f"Period {period} (Test)", label_name_from_id)
 
+def ensure_folder(folder_path: str) -> None:
+    """Create a folder if it does not exist."""
+    os.makedirs(folder_path, exist_ok=True)
+
 # CUDA device auto-selection
 def auto_select_cuda_device(verbose=True):
     """Automatically select the least-used CUDA device, or fallback to CPU."""
@@ -468,34 +472,31 @@ def train_with_ewc(model, output_size, criterion, optimizer,
     gc.collect()
 
 
-
-# === Common Configuration ===
+# Common Configuration
 batch_size = 64
-stop_signal_file = "path/to/your/stop_signal_file.txt"
-model_name = "HAR_MLP"
 num_epochs = 1000
 learning_rate = 0.0001
 weight_decay = 1e-5
 hidden_size = 128
 dropout = 0.2
+stop_signal_file = "path/to/your/stop_signal_file.txt"
 
-
-# === Period 1 Training (No EWC) ===
+# Period 1
 period = 1
-device = auto_select_cuda_device()
+
 X_train, y_train = period_datasets[period]["train"]
 X_val, y_val     = period_datasets[period]["test"]
-input_size       = X_train.shape[1]
-output_size      = len(set(y_train))
-lambda_ewc       = 0.0
-ewc_state        = None
 
-model_saving_folder = "path/to/your/period1_folder"
-os.makedirs(model_saving_folder, exist_ok=True)
+device = auto_select_cuda_device()
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
 
-model     = HAR_MLP_v2(input_size, hidden_size, output_size, dropout).to(device)
+model = HAR_MLP_v2(input_size=input_size, hidden_size=hidden_size, output_size=output_size, dropout=dropout).to(device)
 criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+model_saving_folder = "path/to/your/period1_model_folder"
+ensure_folder(model_saving_folder)
 
 train_with_ewc(
     model=model,
@@ -510,80 +511,174 @@ train_with_ewc(
     num_epochs=num_epochs,
     batch_size=batch_size,
     model_saving_folder=model_saving_folder,
-    model_name=model_name,
+    model_name="ewc_period1",
     stop_signal_file=stop_signal_file,
-    ewc=ewc_state,
-    lambda_ewc=lambda_ewc,
+    ewc=None,
+    lambda_ewc=0.0,
     device=device
 )
 
-del X_train, y_train, X_val, y_val, model
-gc.collect()
-torch.cuda.empty_cache()
+
+# Period 2
+period = 2
+
+X_train, y_train = period_datasets[period]["train"]
+X_val, y_val     = period_datasets[period]["test"]
+
+device = auto_select_cuda_device()
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
+
+model = HAR_MLP_v2(input_size=input_size, hidden_size=hidden_size, output_size=output_size, dropout=dropout).to(device)
+prev_path = "path/to/your/period1_best_model.pth"
+checkpoint = torch.load(prev_path, map_location=device)
+
+state_dict = checkpoint["model_state_dict"]
+model_dict = model.state_dict()
+filtered_dict = {k: v for k, v in state_dict.items() if k in model_dict and model_dict[k].shape == v.shape}
+model.load_state_dict(filtered_dict, strict=False)
+
+criterion = nn.CrossEntropyLoss()
+train_loader = DataLoader(
+    TensorDataset(
+        torch.tensor(period_datasets[1]["train"][0], dtype=torch.float32),
+        torch.tensor(period_datasets[1]["train"][1], dtype=torch.long)
+    ),
+    batch_size=batch_size, shuffle=True
+)
+fisher_dict, params_dict = EWC.compute_fisher_and_params(model, train_loader, criterion, device=device)
+ewc_state = EWC(fisher_dict, params_dict)
+
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+model_saving_folder = "path/to/your/period2_model_folder"
+ensure_folder(model_saving_folder)
+
+train_with_ewc(
+    model=model,
+    output_size=output_size,
+    criterion=criterion,
+    optimizer=optimizer,
+    X_train=X_train,
+    y_train=y_train,
+    X_val=X_val,
+    y_val=y_val,
+    scheduler=None,
+    num_epochs=num_epochs,
+    batch_size=batch_size,
+    model_saving_folder=model_saving_folder,
+    model_name="ewc_period2",
+    stop_signal_file=stop_signal_file,
+    ewc=ewc_state,
+    lambda_ewc=1.0,
+    device=device
+)
 
 
-# === Period 2~4 Training (with EWC) ===
-for period in [2, 3, 4]:
-    device = auto_select_cuda_device()
-    X_train, y_train = period_datasets[period]["train"]
-    X_val, y_val     = period_datasets[period]["test"]
-    input_size       = X_train.shape[1]
-    output_size      = len(set(y_train))
-    lambda_ewc       = 1.0
+# Period 3
+period = 3
 
-    model_saving_folder = f"path/to/your/period{period}_folder"
-    os.makedirs(model_saving_folder, exist_ok=True)
+X_train, y_train = period_datasets[period]["train"]
+X_val, y_val     = period_datasets[period]["test"]
 
-    # === Load model from previous period ===
-    prev_model_path = f"path/to/your/period{period-1}_folder/{model_name}_best.pth"
-    prev_checkpoint = torch.load(prev_model_path, map_location=device)
-    model = HAR_MLP_v2(input_size, hidden_size, output_size, dropout).to(device)
+device = auto_select_cuda_device()
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
 
-    # === Selectively load compatible parameters ===
-    state_dict = prev_checkpoint["model_state_dict"]
-    model_dict = model.state_dict()
-    filtered_dict = {k: v for k, v in state_dict.items() if k in model_dict and model_dict[k].shape == v.shape}
-    model.load_state_dict(filtered_dict, strict=False)
+model = HAR_MLP_v2(input_size=input_size, hidden_size=hidden_size, output_size=output_size, dropout=dropout).to(device)
+prev_path = "path/to/your/period2_best_model.pth"
+checkpoint = torch.load(prev_path, map_location=device)
 
-    # === Compute Fisher Information using previous period's data ===
-    criterion = nn.CrossEntropyLoss()
-    prev_X, prev_y = period_datasets[period - 1]["train"]
-    train_loader = DataLoader(
-        TensorDataset(
-            torch.tensor(prev_X, dtype=torch.float32),
-            torch.tensor(prev_y, dtype=torch.long)
-        ),
-        batch_size=batch_size, shuffle=True
-    )
-    fisher_dict, params_dict = EWC.compute_fisher_and_params(model, train_loader, criterion, device=device)
-    ewc_state = EWC(fisher_dict, params_dict)
+state_dict = checkpoint["model_state_dict"]
+model_dict = model.state_dict()
+filtered_dict = {k: v for k, v in state_dict.items() if k in model_dict and model_dict[k].shape == v.shape}
+model.load_state_dict(filtered_dict, strict=False)
 
-    # === Optimizer and training ===
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    train_with_ewc(
-        model=model,
-        output_size=output_size,
-        criterion=criterion,
-        optimizer=optimizer,
-        X_train=X_train,
-        y_train=y_train,
-        X_val=X_val,
-        y_val=y_val,
-        scheduler=None,
-        num_epochs=num_epochs,
-        batch_size=batch_size,
-        model_saving_folder=model_saving_folder,
-        model_name=model_name,
-        stop_signal_file=stop_signal_file,
-        ewc=ewc_state,
-        lambda_ewc=lambda_ewc,
-        device=device
-    )
+criterion = nn.CrossEntropyLoss()
+train_loader = DataLoader(
+    TensorDataset(
+        torch.tensor(period_datasets[2]["train"][0], dtype=torch.float32),
+        torch.tensor(period_datasets[2]["train"][1], dtype=torch.long)
+    ),
+    batch_size=batch_size, shuffle=True
+)
+fisher_dict, params_dict = EWC.compute_fisher_and_params(model, train_loader, criterion, device=device)
+ewc_state = EWC(fisher_dict, params_dict)
 
-    # === Clean up ===
-    del X_train, y_train, X_val, y_val, train_loader, prev_checkpoint
-    del state_dict, model_dict, filtered_dict, fisher_dict, params_dict, ewc_state, model
-    gc.collect()
-    torch.cuda.empty_cache()
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+model_saving_folder = "path/to/your/period3_model_folder"
+ensure_folder(model_saving_folder)
 
-    
+train_with_ewc(
+    model=model,
+    output_size=output_size,
+    criterion=criterion,
+    optimizer=optimizer,
+    X_train=X_train,
+    y_train=y_train,
+    X_val=X_val,
+    y_val=y_val,
+    scheduler=None,
+    num_epochs=num_epochs,
+    batch_size=batch_size,
+    model_saving_folder=model_saving_folder,
+    model_name="ewc_period3",
+    stop_signal_file=stop_signal_file,
+    ewc=ewc_state,
+    lambda_ewc=1.0,
+    device=device
+)
+
+
+# Period 4
+period = 4
+
+X_train, y_train = period_datasets[period]["train"]
+X_val, y_val     = period_datasets[period]["test"]
+
+device = auto_select_cuda_device()
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
+
+model = HAR_MLP_v2(input_size=input_size, hidden_size=hidden_size, output_size=output_size, dropout=dropout).to(device)
+prev_path = "path/to/your/period3_best_model.pth"
+checkpoint = torch.load(prev_path, map_location=device)
+
+state_dict = checkpoint["model_state_dict"]
+model_dict = model.state_dict()
+filtered_dict = {k: v for k, v in state_dict.items() if k in model_dict and model_dict[k].shape == v.shape}
+model.load_state_dict(filtered_dict, strict=False)
+
+criterion = nn.CrossEntropyLoss()
+train_loader = DataLoader(
+    TensorDataset(
+        torch.tensor(period_datasets[3]["train"][0], dtype=torch.float32),
+        torch.tensor(period_datasets[3]["train"][1], dtype=torch.long)
+    ),
+    batch_size=batch_size, shuffle=True
+)
+fisher_dict, params_dict = EWC.compute_fisher_and_params(model, train_loader, criterion, device=device)
+ewc_state = EWC(fisher_dict, params_dict)
+
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+model_saving_folder = "path/to/your/period4_model_folder"
+ensure_folder(model_saving_folder)
+
+train_with_ewc(
+    model=model,
+    output_size=output_size,
+    criterion=criterion,
+    optimizer=optimizer,
+    X_train=X_train,
+    y_train=y_train,
+    X_val=X_val,
+    y_val=y_val,
+    scheduler=None,
+    num_epochs=num_epochs,
+    batch_size=batch_size,
+    model_saving_folder=model_saving_folder,
+    model_name="ewc_period4",
+    stop_signal_file=stop_signal_file,
+    ewc=ewc_state,
+    lambda_ewc=1.0,
+    device=device
+)

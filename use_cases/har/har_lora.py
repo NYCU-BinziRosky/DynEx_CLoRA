@@ -114,6 +114,10 @@ for period in range(1, 5):
     print_class_distribution(yp_train, f"Period {period} (Train)", label_name_from_id)
     print_class_distribution(yp_test, f"Period {period} (Test)", label_name_from_id)
 
+def ensure_folder(folder_path: str) -> None:
+    """Create a folder if it does not exist."""
+    os.makedirs(folder_path, exist_ok=True)
+
 # CUDA device auto-selection
 def auto_select_cuda_device(verbose=True):
     """Automatically select the least-used CUDA device, or fallback to CPU."""
@@ -429,33 +433,32 @@ def train_with_standard_lora(
     gc.collect()
 
 
-
-# === Common Configuration ===
+# Common Configuration
 batch_size = 64
-stop_signal_file = "path/to/your/stop_signal_file.txt"
-model_name = "HAR_MLP_LoRA_v2"
 num_epochs = 1000
 learning_rate = 0.0001
 weight_decay = 1e-5
 hidden_size = 128
 dropout = 0.2
 lora_r = 4
+stop_signal_file = "path/to/your/stop_signal_file.txt"
 
-# === Period 1 Training (No LoRA) ===
+# Period 1
 period = 1
-device = auto_select_cuda_device()
+
 X_train, y_train = period_datasets[period]["train"]
 X_val, y_val     = period_datasets[period]["test"]
-input_size       = X_train.shape[1]
-output_size      = len(set(y_train))
 
-model_saving_folder = "path/to/your/period1_folder"
-os.makedirs(model_saving_folder, exist_ok=True)
+device = auto_select_cuda_device()
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
 
-model = HAR_MLP_LoRA_v2(input_size, hidden_size, output_size, dropout, lora_rank=lora_r).to(device)
-
+model = HAR_MLP_LoRA_v2(input_size=input_size, hidden_size=hidden_size, output_size=output_size, dropout=dropout).to(device)
 criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+model_saving_folder = "path/to/your/period1_model_folder"
+ensure_folder(model_saving_folder)
 
 train_with_standard_lora(
     model=model,
@@ -470,43 +473,38 @@ train_with_standard_lora(
     num_epochs=num_epochs,
     batch_size=batch_size,
     model_saving_folder=model_saving_folder,
-    model_name=model_name,
+    model_name="lora_period1",
     stop_signal_file=stop_signal_file,
-    period=period
+    device=device
 )
 
-del X_train, y_train, X_val, y_val, model
-gc.collect()
-torch.cuda.empty_cache()
 
-
-# === Period 2 Training (Init LoRA AFTER loading previous model) ===
+# Period 2
 period = 2
-device = auto_select_cuda_device()
+
 X_train, y_train = period_datasets[period]["train"]
 X_val, y_val     = period_datasets[period]["test"]
-input_size       = X_train.shape[1]
-output_size      = len(set(y_train))
 
-model_saving_folder = "path/to/your/period2_folder"
-os.makedirs(model_saving_folder, exist_ok=True)
+device = auto_select_cuda_device()
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
 
-# Load previous model (no LoRA)
-prev_model_path = "path/to/your/period1_folder/HAR_MLP_LoRA_v2_best.pth"
+prev_model_path = "path/to/your/period1_best_model.pth"
 checkpoint = torch.load(prev_model_path, map_location=device)
 prev_state_dict = checkpoint["model_state_dict"]
 
-# Initialize model and load base weights
-model = HAR_MLP_LoRA_v2(input_size, hidden_size, output_size, dropout, lora_rank=lora_r).to(device)
-model.load_state_dict({
-    k: v for k, v in prev_state_dict.items()
-    if not k.startswith("fc3") and not k.startswith("lora_adapter")
-}, strict=False)
+model = HAR_MLP_LoRA_v2(input_size=input_size, hidden_size=hidden_size, output_size=output_size, dropout=dropout, lora_rank=lora_r).to(device)
 model.init_lora()
+model.load_state_dict({
+    k: v for k, v in prev_state_dict.items() if not k.startswith("fc3") and not k.startswith("lora_adapter")
+}, strict=False)
 
 criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.get_trainable_parameters(), lr=learning_rate, weight_decay=weight_decay)
 
+model_saving_folder = "path/to/your/period2_model_folder"
+ensure_folder(model_saving_folder)
+
 train_with_standard_lora(
     model=model,
     output_size=output_size,
@@ -520,59 +518,97 @@ train_with_standard_lora(
     num_epochs=num_epochs,
     batch_size=batch_size,
     model_saving_folder=model_saving_folder,
-    model_name=model_name,
+    model_name="lora_period2",
     stop_signal_file=stop_signal_file,
-    period=period
+    device=device
 )
 
-del X_train, y_train, X_val, y_val, model, checkpoint, prev_state_dict
-gc.collect()
-torch.cuda.empty_cache()
+
+# Period 3
+period = 3
+
+X_train, y_train = period_datasets[period]["train"]
+X_val, y_val     = period_datasets[period]["test"]
+
+device = auto_select_cuda_device()
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
+
+prev_model_path = "path/to/your/period2_best_model.pth"
+checkpoint = torch.load(prev_model_path, map_location=device)
+prev_state_dict = checkpoint["model_state_dict"]
+
+model = HAR_MLP_LoRA_v2(input_size=input_size, hidden_size=hidden_size, output_size=output_size, dropout=dropout, lora_rank=lora_r).to(device)
+model.init_lora()
+model.load_state_dict({
+    k: v for k, v in prev_state_dict.items() if not k.startswith("fc3") and not k.startswith("lora_adapter")
+}, strict=False)
+
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.get_trainable_parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+model_saving_folder = "path/to/your/period3_model_folder"
+ensure_folder(model_saving_folder)
+
+train_with_standard_lora(
+    model=model,
+    output_size=output_size,
+    criterion=criterion,
+    optimizer=optimizer,
+    X_train=X_train,
+    y_train=y_train,
+    X_val=X_val,
+    y_val=y_val,
+    scheduler=None,
+    num_epochs=num_epochs,
+    batch_size=batch_size,
+    model_saving_folder=model_saving_folder,
+    model_name="lora_period3",
+    stop_signal_file=stop_signal_file,
+    device=device
+)
 
 
-# === Period 3 & 4 Training (Init LoRA BEFORE loading) ===
-for period in [3, 4]:
-    device = auto_select_cuda_device()
-    X_train, y_train = period_datasets[period]["train"]
-    X_val, y_val     = period_datasets[period]["test"]
-    input_size       = X_train.shape[1]
-    output_size      = len(set(y_train))
+# Period 4
+period = 4
 
-    model_saving_folder = f"path/to/your/period{period}_folder"
-    os.makedirs(model_saving_folder, exist_ok=True)
+X_train, y_train = period_datasets[period]["train"]
+X_val, y_val     = period_datasets[period]["test"]
 
-    prev_model_path = f"path/to/your/period{period-1}_folder/{model_name}_best.pth"
-    checkpoint = torch.load(prev_model_path, map_location=device)
-    prev_state_dict = checkpoint["model_state_dict"]
+device = auto_select_cuda_device()
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
 
-    model = HAR_MLP_LoRA_v2(input_size, hidden_size, output_size, dropout, lora_rank=lora_r).to(device)
-    model.init_lora()
-    model.load_state_dict({
-        k: v for k, v in prev_state_dict.items()
-        if not k.startswith("fc3")
-    }, strict=False)
+prev_model_path = "path/to/your/period3_best_model.pth"
+checkpoint = torch.load(prev_model_path, map_location=device)
+prev_state_dict = checkpoint["model_state_dict"]
 
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.get_trainable_parameters(), lr=learning_rate, weight_decay=weight_decay)
+model = HAR_MLP_LoRA_v2(input_size=input_size, hidden_size=hidden_size, output_size=output_size, dropout=dropout, lora_rank=lora_r).to(device)
+model.init_lora()
+model.load_state_dict({
+    k: v for k, v in prev_state_dict.items() if not k.startswith("fc3") and not k.startswith("lora_adapter")
+}, strict=False)
 
-    train_with_standard_lora(
-        model=model,
-        output_size=output_size,
-        criterion=criterion,
-        optimizer=optimizer,
-        X_train=X_train,
-        y_train=y_train,
-        X_val=X_val,
-        y_val=y_val,
-        scheduler=None,
-        num_epochs=num_epochs,
-        batch_size=batch_size,
-        model_saving_folder=model_saving_folder,
-        model_name=model_name,
-        stop_signal_file=stop_signal_file,
-        period=period
-    )
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.get_trainable_parameters(), lr=learning_rate, weight_decay=weight_decay)
 
-    del X_train, y_train, X_val, y_val, model, checkpoint, prev_state_dict
-    gc.collect()
-    torch.cuda.empty_cache()
+model_saving_folder = "path/to/your/period4_model_folder"
+ensure_folder(model_saving_folder)
+
+train_with_standard_lora(
+    model=model,
+    output_size=output_size,
+    criterion=criterion,
+    optimizer=optimizer,
+    X_train=X_train,
+    y_train=y_train,
+    X_val=X_val,
+    y_val=y_val,
+    scheduler=None,
+    num_epochs=num_epochs,
+    batch_size=batch_size,
+    model_saving_folder=model_saving_folder,
+    model_name="lora_period4",
+    stop_signal_file=stop_signal_file,
+    device=device
+)

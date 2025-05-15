@@ -38,19 +38,16 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-# === Set working directory manually if needed ===
-# (This should point to your own project directory)
+# Set working directory
 Working_directory = os.path.normpath("path/to/your/project")
 os.chdir(Working_directory)
 
-# === GPU device selection (auto detect least memory usage) ===
+# CUDA device auto-selection
 def auto_select_cuda_device(verbose=True):
-    """
-    Automatically selects the CUDA GPU with the least memory usage.
-    Falls back to CPU if no GPU is available.
-    """
+    """Automatically select the least-used CUDA device, or fallback to CPU."""
     if not torch.cuda.is_available():
-        print("🚫 No CUDA GPU available. Using CPU.")
+        if verbose:
+            print("⚠️ No CUDA device available. Using CPU.")
         return torch.device("cpu")
 
     try:
@@ -60,21 +57,18 @@ def auto_select_cuda_device(verbose=True):
         )
         memory_used = [int(x) for x in smi_output.strip().split('\n')]
         best_gpu = int(np.argmin(memory_used))
-
         if verbose:
-            print("🎯 Automatically selected GPU:")
-            print(f"    - CUDA Device ID : {best_gpu}")
-            print(f"    - Memory Used    : {memory_used[best_gpu]} MiB")
-            print(f"    - Device Name    : {torch.cuda.get_device_name(best_gpu)}")
+            print(f"🎯 Auto-selected GPU: {best_gpu} ({memory_used[best_gpu]} MiB used)")
         return torch.device(f"cuda:{best_gpu}")
     except Exception as e:
-        print(f"⚠️ Failed to auto-detect GPU. Falling back to cuda:0. ({e})")
+        if verbose:
+            print(f"⚠️ GPU detection failed. Falling back to cuda:0 ({e})")
         return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-
-# === Device assignment ===
+# Device assignment
 device = auto_select_cuda_device()
 
+# Utility functions
 def ensure_folder(folder_path: str) -> None:
     """Ensure the given folder exists, create it if not."""
     os.makedirs(folder_path, exist_ok=True)
@@ -714,37 +708,27 @@ def process_and_return_splits(
 
     return X_train, y_train, X_val, y_val, X_test, y_test, Number_features
 
+def print_class_distribution(y, var_name: str) -> None:
+    """
+    Prints the class distribution of a label array.
 
-ticker = 'BTC-USD'
-downsampled_data_minutes = 1  # No downsampling (1-minute interval retained)
+    Args:
+        y: Tensor, array, or list of class labels.
+        var_name: Name of the variable (for display).
+    """
+    if isinstance(y, torch.Tensor):
+        y = y.cpu().numpy()
+    flattened = np.array(y).flatten()
 
-# === Trend Detection Parameters (for 1,000-point sequences) ===
-lower_threshold = 0.0009  # Lower threshold: even small price movements may be considered trends
-upper_threshold = 0.015   # Upper threshold: only stronger movements are marked as strong trends
-reverse_steps = 13        # Minimum number of consecutive reversals to confirm a trend change
+    unique_classes, counts = np.unique(flattened, return_counts=True)
+    total = counts.sum()
 
-# === Features to exclude from log return and trend calculation ===
-exclude_columns = ['MACD', 'MACD_signal', 'ROC_10', 'OBV', 'AD_Line']
-
-# === Feature Selection by Correlation with 'trend' column ===
-# Strongly correlated (correlation > 0.6): Keep
-strongly_correlated = ['close', 'open', 'SMA_5', 'high', 'low', 'EMA_10', 'SMA_10']
-
-# Moderately correlated (correlation between 0.3 and 0.6): Exclude
-moderately_correlated = ['BB_middle', 'BB_lower', 'BB_upper', 'RSI_14']
-
-# Weakly or uncorrelated (correlation <~ 0.3): Exclude
-weakly_correlated = ['SMA_50', 'volume', 'BBW', 'ATR_14']
-
-# Extend the exclude list to include all weakly and moderately correlated features
-exclude_columns += weakly_correlated + moderately_correlated
-
-# === Sequence Generation Parameters ===
-sequence_length = 1000       # Window size for each time-series sample
-sliding_interval = 60        # Stride between two consecutive sequences
-
-
-# === Model Utility Functions ===
+    header = f"Class Distribution for '{var_name}':"
+    line_parts = [
+        f"Class {int(c):<3} Percent: {(count / total) * 100:>6.2f}%"
+        for c, count in zip(unique_classes, counts)
+    ]
+    print(header.ljust(40) + " || ".join(line_parts))
 
 def print_model_info(model):
     """
@@ -756,9 +740,6 @@ def print_model_info(model):
 
     print(f"🧠 Total Parameters        : {total_params}")
     print(f"📦 Model Size (float32)   : {param_size_MB:.2f} MB")
-
-
-# === Forward Transfer (FWT) Computation ===
 
 def compute_fwt_fixed_verbose(previous_model, init_model, X_val, y_val, known_classes, batch_size=64):
     """
@@ -832,36 +813,42 @@ def compute_fwt_fixed_verbose(previous_model, init_model, X_val, y_val, known_cl
 
     return fwt_value, acc_prev, acc_init
 
-
-# === Per-Class Accuracy Tracker ===
-
 def compute_classwise_accuracy(student_logits_flat, y_batch, class_correct, class_total):
     """
-    Compute and accumulate per-class accuracy stats using flat prediction and label tensors.
-
+    Computes per-class accuracy by accumulating correct and total samples for each class using vectorized operations.
+    
     Args:
-        student_logits_flat (Tensor): Logits, shape [B * L, num_classes].
-        y_batch (Tensor): Ground truth, shape [B * L].
-        class_correct (dict): Dict to accumulate correct predictions per class.
-        class_total (dict): Dict to accumulate total samples per class.
+        student_logits_flat (torch.Tensor): Model predictions (logits) in shape [batch_size * seq_len, output_size]
+        y_batch (torch.Tensor): True labels in shape [batch_size * seq_len]
+        class_correct (dict): Dictionary to store correct predictions per class
+        class_total (dict): Dictionary to store total samples per class
     """
+    # Ensure inputs are on the same device
     if student_logits_flat.device != y_batch.device:
         raise ValueError("student_logits_flat and y_batch must be on the same device")
 
-    predictions = torch.argmax(student_logits_flat, dim=-1)
-    correct_mask = (predictions == y_batch)
+    # Convert logits to predicted class indices
+    predictions = torch.argmax(student_logits_flat, dim=-1)  # Shape: [batch_size * seq_len]
+
+    # Compute correct predictions mask
+    correct_mask = (predictions == y_batch)  # Shape: [batch_size * seq_len], boolean
+
+    # Get unique labels in this batch
     unique_labels = torch.unique(y_batch)
 
+    # Update class_total and class_correct using vectorized operations
     for label in unique_labels:
-        label = label.item()
+        label = label.item()  # Convert tensor to scalar
         if label not in class_total:
             class_total[label] = 0
             class_correct[label] = 0
-
+        
+        # Count total samples for this label
         label_mask = (y_batch == label)
         class_total[label] += label_mask.sum().item()
+        
+        # Count correct predictions for this label
         class_correct[label] += (label_mask & correct_mask).sum().item()
-
 
 def setup_file_paths(pair='BTCUSD', base_dir='Data', days=190):
     """
@@ -941,6 +928,114 @@ if __name__ == "__main__":
     print_folder_contents(base_folder_path)
 
 
+def check_gpu_config():
+    """
+    Check GPU availability and display detailed configuration information.
+    """
+    # Check if GPU is available
+    gpu_available = torch.cuda.is_available()
+    
+    # Print header
+    print("=" * 50)
+    print("GPU Configuration Check".center(50))
+    print("=" * 50)
+    
+    # Basic GPU availability
+    print(f"{'PyTorch Version':<25}: {torch.__version__}")
+    print(f"{'GPU Available':<25}: {'Yes' if gpu_available else 'No'}")
+    
+    # If GPU is available, print detailed info
+    if gpu_available:
+        print("-" * 50)
+        print("GPU Details".center(50))
+        print("-" * 50)
+        
+        # Device info
+        print(f"{'Device Name':<25}: {torch.cuda.get_device_name(0)}")
+        print(f"{'Number of GPUs':<25}: {torch.cuda.device_count()}")
+        print(f"{'Current Device Index':<25}: {torch.cuda.current_device()}")
+        
+        # Compute capability and CUDA cores
+        props = torch.cuda.get_device_properties(0)
+        print(f"{'Compute Capability':<25}: {props.major}.{props.minor}")
+        print(f"{'Total CUDA Cores':<25}: {props.multi_processor_count * 128}")  # Approx. 128 cores per SM
+        
+        # Memory info
+        total_memory = props.total_memory / (1024 ** 3)  # Convert to GB
+        memory_allocated = torch.cuda.memory_allocated(0) / (1024 ** 3)
+        memory_reserved = torch.cuda.memory_reserved(0) / (1024 ** 3)
+        print(f"{'Total Memory (GB)':<25}: {total_memory:.2f}")
+        print(f"{'Allocated Memory (GB)':<25}: {memory_allocated:.2f}")
+        print(f"{'Reserved Memory (GB)':<25}: {memory_reserved:.2f}")
+    else:
+        print("-" * 50)
+        print("No GPU detected. Running on CPU.".center(50))
+        print("-" * 50)
+    
+    print("=" * 50)
+
+if __name__ == "__main__":
+    check_gpu_config()
+
+
+def print_torch_config():
+    """Print PyTorch and CUDA configuration in a formatted manner."""
+    print("=" * 50)
+    print("PyTorch Configuration".center(50))
+    print("=" * 50)
+    
+    # Basic PyTorch and CUDA info
+    print(f"{'PyTorch Version':<25}: {torch.__version__}")
+    print(f"{'CUDA Compiled Version':<25}: {torch.version.cuda}")
+    print(f"{'CUDA Available':<25}: {'Yes' if torch.cuda.is_available() else 'No'}")
+    print(f"{'Number of GPUs':<25}: {torch.cuda.device_count()}")
+
+    # GPU details if available
+    if torch.cuda.is_available():
+        print(f"{'GPU Name':<25}: {torch.cuda.get_device_name(0)}")
+
+    print("-" * 50)
+    
+    # Seed setting
+    torch.manual_seed(42)
+    print(f"{'Random Seed':<25}: 42 (Seeding successful!)")
+    
+    print("=" * 50)
+
+if __name__ == "__main__":
+    print_torch_config()
+
+# Configuration Parameters
+ticker = 'BTC-USD'
+downsampled_data_minutes = 1  # No downsampling (1-minute interval retained)
+
+# === Trend Detection Parameters (for 1,000-point sequences) ===
+lower_threshold = 0.0009  # Lower threshold: even small price movements may be considered trends
+upper_threshold = 0.015   # Upper threshold: only stronger movements are marked as strong trends
+reverse_steps = 13        # Minimum number of consecutive reversals to confirm a trend change
+
+# === Features to exclude from log return and trend calculation ===
+exclude_columns = ['MACD', 'MACD_signal', 'ROC_10', 'OBV', 'AD_Line']
+
+# === Feature Selection by Correlation with 'trend' column ===
+# Strongly correlated (correlation > 0.6): Keep
+strongly_correlated = ['close', 'open', 'SMA_5', 'high', 'low', 'EMA_10', 'SMA_10']
+
+# Moderately correlated (correlation between 0.3 and 0.6): Exclude
+moderately_correlated = ['BB_middle', 'BB_lower', 'BB_upper', 'RSI_14']
+
+# Weakly or uncorrelated (correlation <~ 0.3): Exclude
+weakly_correlated = ['SMA_50', 'volume', 'BBW', 'ATR_14']
+
+# Extend the exclude list to include all weakly and moderately correlated features
+exclude_columns += weakly_correlated + moderately_correlated
+
+# === Sequence Generation Parameters ===
+sequence_length = 1000       # Window size for each time-series sample
+sliding_interval = 60        # Stride between two consecutive sequences
+
+
+# Model
 class BiGRUWithAttention(nn.Module):
     """
     A bidirectional GRU model with attention for time-series classification, extended for PNN use.
@@ -1007,7 +1102,7 @@ class BiGRUWithAttention(nn.Module):
         features = self.forward_features(x)
         return self.fc(features)
 
-
+# PNNColumn, ProgressiveNeuralNetwork
 class PNNColumn(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, new_output_size: int, num_layers: int, dropout: float = 0.0):
         """
@@ -1615,6 +1710,8 @@ def train_and_validate_pnn(model, output_size, criterion, optimizer,
     torch.cuda.empty_cache()
 
 
+device = auto_select_cuda_device()
+
 # ================================
 # Period 1: PNN (Initial Training)
 # ================================
@@ -1641,7 +1738,7 @@ learning_rate = 0.0001
 num_epochs = 2000
 batch_size = 64
 model_name = "ProgressiveNeuralNetwork"
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 stop_signal_file = "path/to/your/stop_training.txt"
 model_saving_folder = "path/to/your/period1_folder"
 ensure_folder(model_saving_folder)
@@ -1668,7 +1765,6 @@ train_and_validate(
     model_name=model_name,
     stop_signal_file=stop_signal_file
 )
-
 
 # ================================
 # Period 2: PNN Training
@@ -1718,7 +1814,6 @@ train_and_validate_pnn(
     model_name=model_name,
     stop_signal_file=stop_signal_file
 )
-
 
 # ================================
 # Period 3: PNN Training
@@ -1772,7 +1867,6 @@ train_and_validate_pnn(
     model_name=model_name,
     stop_signal_file=stop_signal_file
 )
-
 
 # ================================
 # Period 4: PNN Training

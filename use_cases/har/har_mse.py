@@ -114,6 +114,10 @@ for period in range(1, 5):
     print_class_distribution(yp_train, f"Period {period} (Train)", label_name_from_id)
     print_class_distribution(yp_test, f"Period {period} (Test)", label_name_from_id)
 
+def ensure_folder(folder_path: str) -> None:
+    """Create a folder if it does not exist."""
+    os.makedirs(folder_path, exist_ok=True)
+
 # CUDA device auto-selection
 def auto_select_cuda_device(verbose=True):
     """Automatically select the least-used CUDA device, or fallback to CPU."""
@@ -420,35 +424,32 @@ def train_with_mse_distillation(
     gc.collect()
 
 
-
-# === Common Configuration ===
+# Common Configuration
 batch_size = 64
-stop_signal_file = "path/to/your/stop_signal_file.txt"
-model_name = "HAR_MLP_v2"
-alpha = 0.1
 num_epochs = 1000
 learning_rate = 0.0001
 weight_decay = 1e-5
 hidden_size = 128
 dropout = 0.2
+alpha = 0.1
+stop_signal_file = "path/to/your/stop_signal_file.txt"
 
-
-# === Period 1 Training (no distillation) ===
+# Period 1
 period = 1
-device = auto_select_cuda_device()
+
 X_train, y_train = period_datasets[period]["train"]
 X_val, y_val     = period_datasets[period]["test"]
-input_size       = X_train.shape[1]
-output_size      = len(set(y_train))
-teacher_model    = None
-stable_classes   = None
 
-model_saving_folder = "path/to/your/period1_folder"
-os.makedirs(model_saving_folder, exist_ok=True)
+device = auto_select_cuda_device()
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
 
-student_model = HAR_MLP_v2(input_size, hidden_size, output_size, dropout).to(device)
-criterion     = nn.CrossEntropyLoss()
-optimizer     = torch.optim.Adam(student_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+student_model = HAR_MLP_v2(input_size=input_size, hidden_size=hidden_size, output_size=output_size, dropout=dropout).to(device)
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(student_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+model_saving_folder = "path/to/your/period1_model_folder"
+ensure_folder(model_saving_folder)
 
 train_with_mse_distillation(
     student_model=student_model,
@@ -459,79 +460,155 @@ train_with_mse_distillation(
     y_train=y_train,
     X_val=X_val,
     y_val=y_val,
-    stable_classes=stable_classes,
+    stable_classes=None,
+    teacher_model=None,
+    alpha=alpha,
+    scheduler=None,
+    num_epochs=num_epochs,
+    batch_size=batch_size,
+    model_saving_folder=model_saving_folder,
+    model_name="mse_period1",
+    stop_signal_file=stop_signal_file,
+    device=device
+)
+
+
+# Period 2
+period = 2
+prev_period = 1
+
+X_train, y_train = period_datasets[period]["train"]
+X_val, y_val     = period_datasets[period]["test"]
+
+device = auto_select_cuda_device()
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
+teacher_output_size = len(set(period_datasets[prev_period]["train"][1]))
+
+teacher_path = "path/to/your/period1_best_model.pth"
+checkpoint = torch.load(teacher_path, map_location=device)
+teacher_model = HAR_MLP_v2(input_size=input_size, hidden_size=hidden_size, output_size=teacher_output_size, dropout=dropout).to(device)
+teacher_model.load_state_dict(checkpoint["model_state_dict"])
+teacher_model.eval()
+
+student_model = HAR_MLP_v2(input_size=input_size, hidden_size=hidden_size, output_size=output_size, dropout=dropout).to(device)
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(student_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+model_saving_folder = "path/to/your/period2_model_folder"
+ensure_folder(model_saving_folder)
+
+train_with_mse_distillation(
+    student_model=student_model,
+    output_size=output_size,
+    criterion=criterion,
+    optimizer=optimizer,
+    X_train=X_train,
+    y_train=y_train,
+    X_val=X_val,
+    y_val=y_val,
+    stable_classes=[0, 1],
     teacher_model=teacher_model,
     alpha=alpha,
     scheduler=None,
     num_epochs=num_epochs,
     batch_size=batch_size,
     model_saving_folder=model_saving_folder,
-    model_name=model_name,
+    model_name="mse_period2",
     stop_signal_file=stop_signal_file,
     device=device
 )
 
-del X_train, y_train, X_val, y_val, student_model
-gc.collect()
-torch.cuda.empty_cache()
+
+# Period 3
+period = 3
+prev_period = 2
+
+X_train, y_train = period_datasets[period]["train"]
+X_val, y_val     = period_datasets[period]["test"]
+
+device = auto_select_cuda_device()
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
+teacher_output_size = len(set(period_datasets[prev_period]["train"][1]))
+
+teacher_path = "path/to/your/period2_best_model.pth"
+checkpoint = torch.load(teacher_path, map_location=device)
+teacher_model = HAR_MLP_v2(input_size=input_size, hidden_size=hidden_size, output_size=teacher_output_size, dropout=dropout).to(device)
+teacher_model.load_state_dict(checkpoint["model_state_dict"])
+teacher_model.eval()
+
+student_model = HAR_MLP_v2(input_size=input_size, hidden_size=hidden_size, output_size=output_size, dropout=dropout).to(device)
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(student_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+model_saving_folder = "path/to/your/period3_model_folder"
+ensure_folder(model_saving_folder)
+
+train_with_mse_distillation(
+    student_model=student_model,
+    output_size=output_size,
+    criterion=criterion,
+    optimizer=optimizer,
+    X_train=X_train,
+    y_train=y_train,
+    X_val=X_val,
+    y_val=y_val,
+    stable_classes=[0, 1, 2],
+    teacher_model=teacher_model,
+    alpha=alpha,
+    scheduler=None,
+    num_epochs=num_epochs,
+    batch_size=batch_size,
+    model_saving_folder=model_saving_folder,
+    model_name="mse_period3",
+    stop_signal_file=stop_signal_file,
+    device=device
+)
 
 
-# === Period 2~4 Training (with teacher + distillation) ===
-stable_classes_map = {
-    2: [0, 1],
-    3: [0, 1, 2],
-    4: [0, 1, 3]
-}
+# Period 4
+period = 4
+prev_period = 3
 
-for period in [2, 3, 4]:
-    prev_period = period - 1
-    device = auto_select_cuda_device()
-    X_train, y_train = period_datasets[period]["train"]
-    X_val, y_val     = period_datasets[period]["test"]
-    input_size       = X_train.shape[1]
-    output_size      = len(set(y_train))
-    teacher_output_size = len(set(period_datasets[prev_period]["train"][1]))
-    stable_classes   = stable_classes_map[period]
+X_train, y_train = period_datasets[period]["train"]
+X_val, y_val     = period_datasets[period]["test"]
 
-    model_saving_folder = f"path/to/your/period{period}_folder"
-    os.makedirs(model_saving_folder, exist_ok=True)
+device = auto_select_cuda_device()
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
+teacher_output_size = len(set(period_datasets[prev_period]["train"][1]))
 
-    # Load teacher model from previous period
-    teacher_model_path = f"path/to/your/period{prev_period}_folder/{model_name}_best.pth"
-    teacher_checkpoint = torch.load(teacher_model_path, map_location=device)
-    teacher_model = HAR_MLP_v2(input_size, hidden_size, teacher_output_size, dropout).to(device)
-    teacher_model.load_state_dict(teacher_checkpoint['model_state_dict'])
-    teacher_model.eval()
+teacher_path = "path/to/your/period3_best_model.pth"
+checkpoint = torch.load(teacher_path, map_location=device)
+teacher_model = HAR_MLP_v2(input_size=input_size, hidden_size=hidden_size, output_size=teacher_output_size, dropout=dropout).to(device)
+teacher_model.load_state_dict(checkpoint["model_state_dict"])
+teacher_model.eval()
 
-    # Initialize student model
-    student_model = HAR_MLP_v2(input_size, hidden_size, output_size, dropout).to(device)
-    criterion     = nn.CrossEntropyLoss()
-    optimizer     = torch.optim.Adam(student_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+student_model = HAR_MLP_v2(input_size=input_size, hidden_size=hidden_size, output_size=output_size, dropout=dropout).to(device)
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(student_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
-    train_with_mse_distillation(
-        student_model=student_model,
-        output_size=output_size,
-        criterion=criterion,
-        optimizer=optimizer,
-        X_train=X_train,
-        y_train=y_train,
-        X_val=X_val,
-        y_val=y_val,
-        stable_classes=stable_classes,
-        teacher_model=teacher_model,
-        alpha=alpha,
-        scheduler=None,
-        num_epochs=num_epochs,
-        batch_size=batch_size,
-        model_saving_folder=model_saving_folder,
-        model_name=model_name,
-        stop_signal_file=stop_signal_file,
-        device=device
-    )
+model_saving_folder = "path/to/your/period4_model_folder"
+ensure_folder(model_saving_folder)
 
-    # Cleanup
-    del X_train, y_train, X_val, y_val, teacher_model, teacher_checkpoint, student_model
-    gc.collect()
-    torch.cuda.empty_cache()
-
-
+train_with_mse_distillation(
+    student_model=student_model,
+    output_size=output_size,
+    criterion=criterion,
+    optimizer=optimizer,
+    X_train=X_train,
+    y_train=y_train,
+    X_val=X_val,
+    y_val=y_val,
+    stable_classes=[0, 1, 3],
+    teacher_model=teacher_model,
+    alpha=alpha,
+    scheduler=None,
+    num_epochs=num_epochs,
+    batch_size=batch_size,
+    model_saving_folder=model_saving_folder,
+    model_name="mse_period4",
+    stop_signal_file=stop_signal_file,
+    device=device
+)

@@ -38,19 +38,16 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-# === Set working directory manually if needed ===
-# (This should point to your own project directory)
+# Set working directory
 Working_directory = os.path.normpath("path/to/your/project")
 os.chdir(Working_directory)
 
-# === GPU device selection (auto detect least memory usage) ===
+# CUDA device auto-selection
 def auto_select_cuda_device(verbose=True):
-    """
-    Automatically selects the CUDA GPU with the least memory usage.
-    Falls back to CPU if no GPU is available.
-    """
+    """Automatically select the least-used CUDA device, or fallback to CPU."""
     if not torch.cuda.is_available():
-        print("🚫 No CUDA GPU available. Using CPU.")
+        if verbose:
+            print("⚠️ No CUDA device available. Using CPU.")
         return torch.device("cpu")
 
     try:
@@ -60,20 +57,18 @@ def auto_select_cuda_device(verbose=True):
         )
         memory_used = [int(x) for x in smi_output.strip().split('\n')]
         best_gpu = int(np.argmin(memory_used))
-
         if verbose:
-            print("🎯 Automatically selected GPU:")
-            print(f"    - CUDA Device ID : {best_gpu}")
-            print(f"    - Memory Used    : {memory_used[best_gpu]} MiB")
-            print(f"    - Device Name    : {torch.cuda.get_device_name(best_gpu)}")
+            print(f"🎯 Auto-selected GPU: {best_gpu} ({memory_used[best_gpu]} MiB used)")
         return torch.device(f"cuda:{best_gpu}")
     except Exception as e:
-        print(f"⚠️ Failed to auto-detect GPU. Falling back to cuda:0. ({e})")
+        if verbose:
+            print(f"⚠️ GPU detection failed. Falling back to cuda:0 ({e})")
         return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# === Device assignment ===
+# Device assignment
 device = auto_select_cuda_device()
 
+# Utility functions
 def ensure_folder(folder_path: str) -> None:
     """Ensure the given folder exists, create it if not."""
     os.makedirs(folder_path, exist_ok=True)
@@ -713,7 +708,6 @@ def process_and_return_splits(
 
     return X_train, y_train, X_val, y_val, X_test, y_test, Number_features
 
-
 def print_class_distribution(y, var_name: str) -> None:
     """
     Prints the class distribution of a label array.
@@ -736,37 +730,6 @@ def print_class_distribution(y, var_name: str) -> None:
     ]
     print(header.ljust(40) + " || ".join(line_parts))
 
-ticker = 'BTC-USD'
-downsampled_data_minutes = 1  # No downsampling (1-minute interval retained)
-
-# === Trend Detection Parameters (for 1,000-point sequences) ===
-lower_threshold = 0.0009  # Lower threshold: even small price movements may be considered trends
-upper_threshold = 0.015   # Upper threshold: only stronger movements are marked as strong trends
-reverse_steps = 13        # Minimum number of consecutive reversals to confirm a trend change
-
-# === Features to exclude from log return and trend calculation ===
-exclude_columns = ['MACD', 'MACD_signal', 'ROC_10', 'OBV', 'AD_Line']
-
-# === Feature Selection by Correlation with 'trend' column ===
-# Strongly correlated (correlation > 0.6): Keep
-strongly_correlated = ['close', 'open', 'SMA_5', 'high', 'low', 'EMA_10', 'SMA_10']
-
-# Moderately correlated (correlation between 0.3 and 0.6): Exclude
-moderately_correlated = ['BB_middle', 'BB_lower', 'BB_upper', 'RSI_14']
-
-# Weakly or uncorrelated (correlation <~ 0.3): Exclude
-weakly_correlated = ['SMA_50', 'volume', 'BBW', 'ATR_14']
-
-# Extend the exclude list to include all weakly and moderately correlated features
-exclude_columns += weakly_correlated + moderately_correlated
-
-# === Sequence Generation Parameters ===
-sequence_length = 1000       # Window size for each time-series sample
-sliding_interval = 60        # Stride between two consecutive sequences
-
-
-# === Model Utility Functions ===
-
 def print_model_info(model):
     """
     Print total number of parameters and estimated model size in MB (float32).
@@ -777,9 +740,6 @@ def print_model_info(model):
 
     print(f"🧠 Total Parameters        : {total_params}")
     print(f"📦 Model Size (float32)   : {param_size_MB:.2f} MB")
-
-
-# === Forward Transfer (FWT) Computation ===
 
 def compute_fwt_fixed_verbose(previous_model, init_model, X_val, y_val, known_classes, batch_size=64):
     """
@@ -853,9 +813,6 @@ def compute_fwt_fixed_verbose(previous_model, init_model, X_val, y_val, known_cl
 
     return fwt_value, acc_prev, acc_init
 
-
-# === Per-Class Accuracy Tracker ===
-
 def compute_classwise_accuracy(student_logits_flat, y_batch, class_correct, class_total):
     """
     Computes per-class accuracy by accumulating correct and total samples for each class using vectorized operations.
@@ -892,7 +849,6 @@ def compute_classwise_accuracy(student_logits_flat, y_batch, class_correct, clas
         
         # Count correct predictions for this label
         class_correct[label] += (label_mask & correct_mask).sum().item()
-
 
 def setup_file_paths(pair='BTCUSD', base_dir='Data', days=190):
     """
@@ -971,6 +927,7 @@ if __name__ == "__main__":
     # Print folder contents
     print_folder_contents(base_folder_path)
 
+
 def check_gpu_config():
     """
     Check GPU availability and display detailed configuration information.
@@ -1048,7 +1005,37 @@ def print_torch_config():
 if __name__ == "__main__":
     print_torch_config()
 
+# Configuration Parameters
+ticker = 'BTC-USD'
+downsampled_data_minutes = 1  # No downsampling (1-minute interval retained)
 
+# === Trend Detection Parameters (for 1,000-point sequences) ===
+lower_threshold = 0.0009  # Lower threshold: even small price movements may be considered trends
+upper_threshold = 0.015   # Upper threshold: only stronger movements are marked as strong trends
+reverse_steps = 13        # Minimum number of consecutive reversals to confirm a trend change
+
+# === Features to exclude from log return and trend calculation ===
+exclude_columns = ['MACD', 'MACD_signal', 'ROC_10', 'OBV', 'AD_Line']
+
+# === Feature Selection by Correlation with 'trend' column ===
+# Strongly correlated (correlation > 0.6): Keep
+strongly_correlated = ['close', 'open', 'SMA_5', 'high', 'low', 'EMA_10', 'SMA_10']
+
+# Moderately correlated (correlation between 0.3 and 0.6): Exclude
+moderately_correlated = ['BB_middle', 'BB_lower', 'BB_upper', 'RSI_14']
+
+# Weakly or uncorrelated (correlation <~ 0.3): Exclude
+weakly_correlated = ['SMA_50', 'volume', 'BBW', 'ATR_14']
+
+# Extend the exclude list to include all weakly and moderately correlated features
+exclude_columns += weakly_correlated + moderately_correlated
+
+# === Sequence Generation Parameters ===
+sequence_length = 1000       # Window size for each time-series sample
+sliding_interval = 60        # Stride between two consecutive sequences
+
+
+# Model
 class LoRA(nn.Module):
     def __init__(self, linear_layer: nn.Linear, rank: int):
         """
@@ -1059,7 +1046,7 @@ class LoRA(nn.Module):
             rank (int): The rank of the LoRA adjustment matrices (e.g., 8).
         """
         super(LoRA, self).__init__()
-        self.linear = linear_layer  # 保留對 linear_layer 的引用
+        self.linear = linear_layer
         self.rank = rank
         
         # Get input and output dimensions from the linear layer
@@ -1194,8 +1181,7 @@ class BiGRUWithAttention(nn.Module):
         out = self.fc(out)  # Shape: (batch_size, seq_length, output_size)
         return out
     
-
-# Period 1 Training Function
+# Training Function for Period 1
 def train_and_validate(model, output_size, criterion, optimizer, 
                        X_train, y_train, X_val, y_val, scheduler, 
                        use_scheduler=None, num_epochs=10, batch_size=64, 
@@ -1391,7 +1377,7 @@ def train_and_validate(model, output_size, criterion, optimizer,
     gc.collect()
 
 
-# Train and Validate Function for Period 2+
+# Training Function for Period 2 and Beyond
 def train_and_validate_lora(student_model, teacher_model, stable_classes, output_size, criterion, optimizer, 
                             X_train, y_train, X_val, y_val, scheduler, 
                             use_scheduler=None, num_epochs=10, batch_size=64, alpha=0.5,
@@ -1594,7 +1580,6 @@ def train_and_validate_lora(student_model, teacher_model, stable_classes, output
                                     print(f"Associated New Class {label} to LoRA adapter {key}")
                                 break  # Assume one association per new class
 
-    # Default: Freeze all attention_fc and LoRA adapters
     for param in student_model.attention_fc.parameters():
         param.requires_grad = False
     for lora in student_model.lora_adapters:
@@ -1626,8 +1611,6 @@ def train_and_validate_lora(student_model, teacher_model, stable_classes, output
     )
 
     print(f"Current Related_labels: {related_labels}")
-
-    print_model_info(student_model)
     
     for epoch in range(num_epochs):
         epoch_loss = 0.0
@@ -1802,13 +1785,12 @@ def train_and_validate_lora(student_model, teacher_model, stable_classes, output
     return class_features_dict
 
 
-# =========================
-# ✅ Period 1: DynEx-CLoRA Training (No LoRA)
-# =========================
-# Prepare Data
+device = auto_select_cuda_device()
+
+# Period 1
 with contextlib.redirect_stdout(open(os.devnull, 'w')):
     X_train, y_train, X_val, y_val, X_test, y_test, Number_features = process_and_return_splits(
-        with_indicators_file_path=list_period_files_full_path[0],
+        with_indicators_file_path="path/to/your/period1_file.csv",
         downsampled_data_minutes=downsampled_data_minutes,
         exclude_columns=exclude_columns,
         lower_threshold=lower_threshold,
@@ -1819,22 +1801,21 @@ with contextlib.redirect_stdout(open(os.devnull, 'w')):
         trends_to_keep={0, 1}
     )
 
-# Model Config
 input_size = Number_features
 output_size = len(np.unique(y_val))
 model = BiGRUWithAttention(
     input_size=input_size, hidden_size=64, output_size=output_size,
     num_layers=4, dropout=0.0, lora_rank=4).to(device)
 
-# Paths & Training
-stop_signal_file = "path/to/stop.txt"
-model_saving_folder = "path/to/period1_folder"
+stop_signal_file = "path/to/your/stop_signal.txt"
+model_saving_folder = "path/to/your/period1_folder"
 ensure_folder(model_saving_folder)
 
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.0001)
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.9, patience=10)
 
+# === Train ===
 train_and_validate(
     model, output_size, criterion, optimizer,
     X_train, y_train, X_val, y_val,
@@ -1843,14 +1824,10 @@ train_and_validate(
     stop_signal_file=stop_signal_file
 )
 
-
-# =========================
-# ✅ Period 2: Load + Init LoRA + Sim Match
-# =========================
-# Prepare Data
+# Period 2
 with contextlib.redirect_stdout(open(os.devnull, 'w')):
     X_train, y_train, X_val, y_val, X_test, y_test, Number_features = process_and_return_splits(
-        with_indicators_file_path=list_period_files_full_path[1],
+        with_indicators_file_path="path/to/your/period2_file.csv",
         downsampled_data_minutes=downsampled_data_minutes,
         exclude_columns=exclude_columns,
         lower_threshold=lower_threshold,
@@ -1866,29 +1843,24 @@ output_size = len(np.unique(y_val))
 stable_classes = [1]
 alpha = 0.1
 
-# Paths
-model_saving_folder = f"path/to/period2_folder"
-teacher_ckpt_path = "path/to/period1_folder/BiGRUWithAttention_best.pth"
-class_feature_path = "path/to/period1_folder/class_features.pkl"
+model_saving_folder = "path/to/your/period2_folder"
+teacher_ckpt_path = "path/to/your/period1_model.pth"
+class_feature_path = "path/to/your/class_features.pkl"
 ensure_folder(model_saving_folder)
 
-# Load class features
 task_features = pickle.load(open(class_feature_path, 'rb')) if os.path.exists(class_feature_path) else {}
 
-# Load teacher model
 teacher = BiGRUWithAttention(input_size, 64, output_size-1, 4, 0.0, 4).to(device)
-teacher_ckpt = torch.load(teacher_ckpt_path, map_location=device)
+teacher_ckpt = torch.load(teacher_ckpt_path, map_location=device, weights_only=True)
 num_adapters = teacher_ckpt.get('num_lora_adapters', 0)
 related_labels = {'attention_fc': [0, 1]}
 for _ in range(num_adapters): teacher.add_lora_adapter()
 teacher.load_state_dict(teacher_ckpt['model_state_dict'])
 
-# Init student
 student = BiGRUWithAttention(input_size, 64, output_size, 4, 0.0, 4).to(device)
 for _ in range(num_adapters): student.add_lora_adapter()
 student.load_state_dict({k: v for k, v in teacher.state_dict().items() if 'fc' not in k}, strict=False)
 
-# Train
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(student.parameters(), lr=0.0001)
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.9, patience=10)
@@ -1904,165 +1876,107 @@ class_features_dict = train_and_validate_lora(
 with open(os.path.join(model_saving_folder, "class_features.pkl"), 'wb') as f:
     pickle.dump(class_features_dict, f)
 
-
-# === DynEx-CLoRA Period 3 ===
+# Period 3
 with contextlib.redirect_stdout(open(os.devnull, 'w')):
     X_train, y_train, X_val, y_val, X_test, y_test, Number_features = process_and_return_splits(
-        with_indicators_file_path = list_period_files_full_path[2],
-        downsampled_data_minutes = downsampled_data_minutes,
-        exclude_columns = exclude_columns,
-        lower_threshold = lower_threshold,
-        upper_threshold = upper_threshold,
-        reverse_steps = reverse_steps,
-        sequence_length = sequence_length,
-        sliding_interval = sliding_interval,
-        trends_to_keep = {0, 1, 2, 3}
+        with_indicators_file_path="path/to/your/period3_file.csv",
+        downsampled_data_minutes=downsampled_data_minutes,
+        exclude_columns=exclude_columns,
+        lower_threshold=lower_threshold,
+        upper_threshold=upper_threshold,
+        reverse_steps=reverse_steps,
+        sequence_length=sequence_length,
+        sliding_interval=sliding_interval,
+        trends_to_keep={0, 1, 2, 3}
     )
 
-unique_classes = np.unique(y_val)
-num_classes = len(unique_classes)
-
 input_size = Number_features
-hidden_size = 64
-output_size = num_classes
-num_layers = 4
-dropout = 0.0
-lora_r = 4
+output_size = len(np.unique(y_val))
+stable_classes = [1, 2]
 alpha = 0.1
-learning_rate = 0.0001
-num_epochs = 2000
-batch_size = 64
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model_name = 'BiGRUWithAttention'
-best_results = []
 
-stop_signal_file = os.path.normpath(os.path.join('Class_Incremental_CL', 'David_Classif_Bi_Dir_GRU_Model/stop_training.txt'))
-model_saving_folder = os.path.normpath(os.path.join(
-    'Class_Incremental_CL', f'David_Classif_Bi_Dir_GRU_Model/Trained_models/LoRA_v8/Rank_4_Period_3/alpha_{alpha}'
-))
+model_saving_folder = "path/to/your/period3_folder"
+teacher_ckpt_path = "path/to/your/period2_model.pth"
+class_feature_path = "path/to/your/class_features.pkl"
 ensure_folder(model_saving_folder)
 
-# Load previous class features and related_labels
-prev_folder = os.path.normpath(os.path.join(
-    'Class_Incremental_CL', f'David_Classif_Bi_Dir_GRU_Model/Trained_models/LoRA_v8/Rank_4_Period_2/alpha_{alpha}'
-))
-with open(os.path.join(prev_folder, "class_features.pkl"), 'rb') as f:
-    class_features_dict = pickle.load(f)
+task_features = pickle.load(open(class_feature_path, 'rb')) if os.path.exists(class_feature_path) else {}
 
-teacher_ckpt_path = os.path.join(prev_folder, "BiGRUWithAttention_best.pth")
+teacher = BiGRUWithAttention(input_size, 64, output_size-1, 4, 0.0, 4).to(device)
 teacher_ckpt = torch.load(teacher_ckpt_path, map_location=device, weights_only=True)
+num_adapters = teacher_ckpt.get('num_lora_adapters', 0)
 related_labels = teacher_ckpt.get('related_labels', {'attention_fc': [0, 1]})
-num_lora_adapters = teacher_ckpt.get('num_lora_adapters', 0)
+for _ in range(num_adapters):
+    teacher.add_lora_adapter()
+teacher.load_state_dict(teacher_ckpt['model_state_dict'])
 
-teacher_model = BiGRUWithAttention(input_size, hidden_size, output_size - 1, num_layers, dropout, lora_r).to(device)
-for _ in range(num_lora_adapters):
-    teacher_model.add_lora_adapter()
-teacher_model.load_state_dict(teacher_ckpt['model_state_dict'])
-del teacher_ckpt
-
-student_model = BiGRUWithAttention(input_size, hidden_size, output_size, num_layers, dropout, lora_r).to(device)
-for _ in range(num_lora_adapters):
-    student_model.add_lora_adapter()
-
-# Copy weights except FC
-state_dict_teacher = teacher_model.state_dict()
-state_dict_student = student_model.state_dict()
-for name, param in state_dict_teacher.items():
-    if 'fc' not in name:
-        state_dict_student[name].copy_(param)
-student_model.load_state_dict(state_dict_student)
+student = BiGRUWithAttention(input_size, 64, output_size, 4, 0.0, 4).to(device)
+for _ in range(num_adapters):
+    student.add_lora_adapter()
+student.load_state_dict({k: v for k, v in teacher.state_dict().items() if 'fc' not in k}, strict=False)
 
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(student_model.parameters(), lr=learning_rate)
+optimizer = optim.Adam(student.parameters(), lr=0.0001)
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.9, patience=10)
 
-stable_classes = [1, 2]
 class_features_dict = train_and_validate_lora(
-    student_model, teacher_model, stable_classes, output_size, criterion, optimizer,
-    X_train, y_train, X_val, y_val, scheduler, False, num_epochs, batch_size,
-    alpha, model_saving_folder, model_name, stop_signal_file,
-    class_features_dict, tau_high=0.5, tau_low=0.5, related_labels=related_labels
+    student, teacher, stable_classes, output_size, criterion, optimizer,
+    X_train, y_train, X_val, y_val, scheduler, use_scheduler=False, num_epochs=2000, batch_size=64, alpha=alpha,
+    model_saving_folder=model_saving_folder, model_name="BiGRUWithAttention", stop_signal_file="path/to/your/stop_signal.txt",
+    class_features_dict=task_features, tau_high=0.5, tau_low=0.5, related_labels=related_labels
 )
 
 with open(os.path.join(model_saving_folder, "class_features.pkl"), 'wb') as f:
     pickle.dump(class_features_dict, f)
 
-# === DynEx-CLoRA Period 4 ===
+# Period 4
 with contextlib.redirect_stdout(open(os.devnull, 'w')):
     X_train, y_train, X_val, y_val, X_test, y_test, Number_features = process_and_return_splits(
-        with_indicators_file_path = list_period_files_full_path[3],
-        downsampled_data_minutes = downsampled_data_minutes,
-        exclude_columns = exclude_columns,
-        lower_threshold = lower_threshold,
-        upper_threshold = upper_threshold,
-        reverse_steps = reverse_steps,
-        sequence_length = sequence_length,
-        sliding_interval = sliding_interval,
-        trends_to_keep = {0, 1, 2, 3, 4}
+        with_indicators_file_path="path/to/your/period4_file.csv",
+        downsampled_data_minutes=downsampled_data_minutes,
+        exclude_columns=exclude_columns,
+        lower_threshold=lower_threshold,
+        upper_threshold=upper_threshold,
+        reverse_steps=reverse_steps,
+        sequence_length=sequence_length,
+        sliding_interval=sliding_interval,
+        trends_to_keep={0, 1, 2, 3, 4}
     )
 
-unique_classes = np.unique(y_val)
-num_classes = len(unique_classes)
-
 input_size = Number_features
-hidden_size = 64
-output_size = num_classes
-num_layers = 4
-dropout = 0.0
-lora_r = 4
+output_size = len(np.unique(y_val))
+stable_classes = [1, 2, 3]
 alpha = 0.1
-learning_rate = 0.0001
-num_epochs = 2000
-batch_size = 64
 
-model_name = 'BiGRUWithAttention'
-stop_signal_file = os.path.normpath(os.path.join('Class_Incremental_CL', 'David_Classif_Bi_Dir_GRU_Model/stop_training.txt'))
-model_saving_folder = os.path.normpath(os.path.join(
-    'Class_Incremental_CL', f'David_Classif_Bi_Dir_GRU_Model/Trained_models/LoRA_v8/Rank_4_Period_4/alpha_{alpha}'
-))
+model_saving_folder = "path/to/your/period4_folder"
+teacher_ckpt_path = "path/to/your/period3_model.pth"
+class_feature_path = "path/to/your/class_features.pkl"
 ensure_folder(model_saving_folder)
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+task_features = pickle.load(open(class_feature_path, 'rb')) if os.path.exists(class_feature_path) else {}
 
-# Load class features and teacher model from Period 3
-prev_folder = os.path.normpath(os.path.join(
-    'Class_Incremental_CL', f'David_Classif_Bi_Dir_GRU_Model/Trained_models/LoRA_v8/Rank_4_Period_3/alpha_{alpha}'
-))
-with open(os.path.join(prev_folder, "class_features.pkl"), 'rb') as f:
-    class_features_dict = pickle.load(f)
-
-teacher_ckpt_path = os.path.join(prev_folder, "BiGRUWithAttention_best.pth")
+teacher = BiGRUWithAttention(input_size, 64, output_size-1, 4, 0.0, 4).to(device)
 teacher_ckpt = torch.load(teacher_ckpt_path, map_location=device, weights_only=True)
+num_adapters = teacher_ckpt.get('num_lora_adapters', 0)
 related_labels = teacher_ckpt.get('related_labels', {'attention_fc': [0, 1]})
-num_lora_adapters = teacher_ckpt.get('num_lora_adapters', 0)
+for _ in range(num_adapters):
+    teacher.add_lora_adapter()
+teacher.load_state_dict(teacher_ckpt['model_state_dict'])
 
-teacher_model = BiGRUWithAttention(input_size, hidden_size, output_size - 1, num_layers, dropout, lora_r).to(device)
-for _ in range(num_lora_adapters):
-    teacher_model.add_lora_adapter()
-teacher_model.load_state_dict(teacher_ckpt['model_state_dict'])
-del teacher_ckpt
-
-student_model = BiGRUWithAttention(input_size, hidden_size, output_size, num_layers, dropout, lora_r).to(device)
-for _ in range(num_lora_adapters):
-    student_model.add_lora_adapter()
-
-state_dict_teacher = teacher_model.state_dict()
-state_dict_student = student_model.state_dict()
-for name, param in state_dict_teacher.items():
-    if 'fc' not in name:
-        state_dict_student[name].copy_(param)
-student_model.load_state_dict(state_dict_student)
+student = BiGRUWithAttention(input_size, 64, output_size, 4, 0.0, 4).to(device)
+for _ in range(num_adapters):
+    student.add_lora_adapter()
+student.load_state_dict({k: v for k, v in teacher.state_dict().items() if 'fc' not in k}, strict=False)
 
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(student_model.parameters(), lr=learning_rate)
+optimizer = optim.Adam(student.parameters(), lr=0.0001)
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.9, patience=10)
 
-stable_classes = [1, 2, 3]
 class_features_dict = train_and_validate_lora(
-    student_model, teacher_model, stable_classes, output_size, criterion, optimizer,
-    X_train, y_train, X_val, y_val, scheduler, False, num_epochs, batch_size,
-    alpha, model_saving_folder, model_name, stop_signal_file,
-    class_features_dict, tau_high=0.5, tau_low=0.5, related_labels=related_labels
+    student, teacher, stable_classes, output_size, criterion, optimizer,
+    X_train, y_train, X_val, y_val, scheduler, use_scheduler=False, num_epochs=2000, batch_size=64, alpha=alpha,
+    model_saving_folder=model_saving_folder, model_name="BiGRUWithAttention", stop_signal_file="path/to/your/stop_signal.txt",
+    class_features_dict=task_features, tau_high=0.5, tau_low=0.5, related_labels=related_labels
 )
 
 with open(os.path.join(model_saving_folder, "class_features.pkl"), 'wb') as f:

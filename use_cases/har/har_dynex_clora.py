@@ -114,6 +114,10 @@ for period in range(1, 5):
     print_class_distribution(yp_train, f"Period {period} (Train)", label_name_from_id)
     print_class_distribution(yp_test, f"Period {period} (Test)", label_name_from_id)
 
+def ensure_folder(folder_path: str) -> None:
+    """Create a folder if it does not exist."""
+    os.makedirs(folder_path, exist_ok=True)
+
 # CUDA device auto-selection
 def auto_select_cuda_device(verbose=True):
     """Automatically select the least-used CUDA device, or fallback to CPU."""
@@ -505,11 +509,8 @@ def train_with_dynex_clora(
     gc.collect()
 
 
-
-# === Common Configuration ===
+# Common Configuration
 batch_size = 64
-stop_signal_file = "path/to/your/stop_signal_file.txt"
-model_name = "HAR_MLP_LoRA_v2"
 num_epochs = 1000
 learning_rate = 0.0001
 weight_decay = 1e-5
@@ -518,92 +519,48 @@ dropout = 0.2
 lora_r = 4
 alpha = 0.1
 similarity_threshold = 0.5
+stop_signal_file = "path/to/your/stop_signal_file.txt"
 
-
-
-# === Period 1 Training ===
-period = 1
-device = auto_select_cuda_device()
+# Period 2
+period = 2
 X_train, y_train = period_datasets[period]["train"]
 X_val, y_val     = period_datasets[period]["test"]
-input_size       = X_train.shape[1]
-output_size      = len(set(y_train))
 
-model_saving_folder = "path/to/your/period1_folder"
-os.makedirs(model_saving_folder, exist_ok=True)
+device = auto_select_cuda_device()
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
+stable_classes = [0, 1]
+
+model_saving_folder = "path/to/your/period2_model_folder"
+ensure_folder(model_saving_folder)
+
+prev_folder = "path/to/your/period1_folder"
+class_features_path = os.path.join(prev_folder, "class_features.pkl")
+with open(class_features_path, "rb") as f:
+    class_features_dict = pickle.load(f)
+
+teacher_ckpt = torch.load(os.path.join(prev_folder, "dynex_period1_best.pth"), map_location=device)
+num_adapters = teacher_ckpt.get("num_lora_adapters", 0)
+related_labels = teacher_ckpt.get("related_labels", {"fc2": [0, 1]})
+
+teacher_model = HAR_MLP_LoRA_v2(input_size, hidden_size, output_size - 1, dropout, lora_rank=lora_r).to(device)
+for _ in range(num_adapters):
+    teacher_model.add_lora_adapter()
+teacher_model.load_state_dict(teacher_ckpt["model_state_dict"])
 
 model = HAR_MLP_LoRA_v2(input_size, hidden_size, output_size, dropout, lora_rank=lora_r).to(device)
+for _ in range(num_adapters):
+    model.add_lora_adapter()
+model.load_state_dict({
+    k: v for k, v in teacher_model.state_dict().items()
+    if not k.startswith("fc3")
+}, strict=False)
+
 criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
 train_with_dynex_clora(
     model=model,
-    teacher_model=None,
-    output_size=output_size,
-    criterion=criterion,
-    optimizer=optimizer,
-    X_train=X_train,
-    y_train=y_train,
-    X_val=X_val,
-    y_val=y_val,
-    num_epochs=num_epochs,
-    batch_size=batch_size,
-    alpha=alpha,
-    model_saving_folder=model_saving_folder,
-    model_name=model_name,
-    stop_signal_file=stop_signal_file,
-    scheduler=None,
-    period=period,
-    stable_classes=None,
-    class_features_dict=None,
-    related_labels={"fc2": [0, 1]},
-    similarity_threshold=similarity_threshold
-)
-
-del X_train, y_train, X_val, y_val, model
-gc.collect()
-torch.cuda.empty_cache()
-
-
-# === Period 2 Training ===
-period = 2
-device = auto_select_cuda_device()
-X_train, y_train = period_datasets[period]["train"]
-X_val, y_val     = period_datasets[period]["test"]
-input_size       = X_train.shape[1]
-output_size      = len(set(y_train))
-stable_classes   = [0, 1]
-
-prev_folder = "path/to/your/period1_folder"
-model_saving_folder = "path/to/your/period2_folder"
-os.makedirs(model_saving_folder, exist_ok=True)
-
-with open(os.path.join(prev_folder, "class_features.pkl"), 'rb') as f:
-    class_features_dict = pickle.load(f)
-
-teacher_model = HAR_MLP_LoRA_v2(input_size, hidden_size, output_size - 1, dropout, lora_rank=lora_r).to(device)
-checkpoint = torch.load(os.path.join(prev_folder, f"{model_name}_best.pth"), map_location=device)
-num_lora_adapters = checkpoint.get("num_lora_adapters", 0)
-related_labels = checkpoint.get("related_labels", {"fc2": [0, 1]})
-for _ in range(num_lora_adapters):
-    teacher_model.add_lora_adapter()
-teacher_model.load_state_dict(checkpoint["model_state_dict"])
-
-student_model = HAR_MLP_LoRA_v2(input_size, hidden_size, output_size, dropout, lora_rank=lora_r).to(device)
-for _ in range(num_lora_adapters):
-    student_model.add_lora_adapter()
-student_dict = student_model.state_dict()
-teacher_dict = teacher_model.state_dict()
-for name in student_dict:
-    if name in teacher_dict and student_dict[name].shape == teacher_dict[name].shape and not name.startswith("fc3"):
-        student_dict[name].copy_(teacher_dict[name])
-student_model.load_state_dict(student_dict)
-
-criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(student_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-
-train_with_dynex_clora(
-    model=student_model,
     teacher_model=teacher_model,
     output_size=output_size,
     criterion=criterion,
@@ -616,60 +573,58 @@ train_with_dynex_clora(
     batch_size=batch_size,
     alpha=alpha,
     model_saving_folder=model_saving_folder,
-    model_name=model_name,
+    model_name="dynex_period2",
     stop_signal_file=stop_signal_file,
     scheduler=None,
     period=period,
     stable_classes=stable_classes,
+    similarity_threshold=similarity_threshold,
     class_features_dict=class_features_dict,
     related_labels=related_labels,
-    similarity_threshold=similarity_threshold
+    device=device
 )
 
-del X_train, y_train, X_val, y_val, teacher_model, student_model
-gc.collect()
-torch.cuda.empty_cache()
 
-
-# === Period 3 Training ===
+# Period 3
 period = 3
-device = auto_select_cuda_device()
 X_train, y_train = period_datasets[period]["train"]
 X_val, y_val     = period_datasets[period]["test"]
-input_size       = X_train.shape[1]
-output_size      = len(set(y_train))
-stable_classes   = [0, 1, 2]
+
+device = auto_select_cuda_device()
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
+stable_classes = [0, 1, 2]
+
+model_saving_folder = "path/to/your/period3_model_folder"
+ensure_folder(model_saving_folder)
 
 prev_folder = "path/to/your/period2_folder"
-model_saving_folder = "path/to/your/period3_folder"
-os.makedirs(model_saving_folder, exist_ok=True)
-
-with open(os.path.join(prev_folder, "class_features.pkl"), 'rb') as f:
+class_features_path = os.path.join(prev_folder, "class_features.pkl")
+with open(class_features_path, "rb") as f:
     class_features_dict = pickle.load(f)
 
-teacher_model = HAR_MLP_LoRA_v2(input_size, hidden_size, output_size - 1, dropout, lora_rank=lora_r).to(device)
-checkpoint = torch.load(os.path.join(prev_folder, f"{model_name}_best.pth"), map_location=device)
-num_lora_adapters = checkpoint.get("num_lora_adapters", 0)
-related_labels = checkpoint.get("related_labels", {})
-for _ in range(num_lora_adapters):
-    teacher_model.add_lora_adapter()
-teacher_model.load_state_dict(checkpoint["model_state_dict"])
+teacher_ckpt = torch.load(os.path.join(prev_folder, "dynex_period2_best.pth"), map_location=device)
+num_adapters = teacher_ckpt.get("num_lora_adapters", 0)
+related_labels = teacher_ckpt.get("related_labels", {"fc2": [0, 1]})
 
-student_model = HAR_MLP_LoRA_v2(input_size, hidden_size, output_size, dropout, lora_rank=lora_r).to(device)
-for _ in range(num_lora_adapters):
-    student_model.add_lora_adapter()
-student_dict = student_model.state_dict()
-teacher_dict = teacher_model.state_dict()
-for name in student_dict:
-    if name in teacher_dict and student_dict[name].shape == teacher_dict[name].shape and not name.startswith("fc3"):
-        student_dict[name].copy_(teacher_dict[name])
-student_model.load_state_dict(student_dict)
+teacher_model = HAR_MLP_LoRA_v2(input_size, hidden_size, output_size - 1, dropout, lora_rank=lora_r).to(device)
+for _ in range(num_adapters):
+    teacher_model.add_lora_adapter()
+teacher_model.load_state_dict(teacher_ckpt["model_state_dict"])
+
+model = HAR_MLP_LoRA_v2(input_size, hidden_size, output_size, dropout, lora_rank=lora_r).to(device)
+for _ in range(num_adapters):
+    model.add_lora_adapter()
+model.load_state_dict({
+    k: v for k, v in teacher_model.state_dict().items()
+    if not k.startswith("fc3")
+}, strict=False)
 
 criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(student_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
 train_with_dynex_clora(
-    model=student_model,
+    model=model,
     teacher_model=teacher_model,
     output_size=output_size,
     criterion=criterion,
@@ -682,84 +637,58 @@ train_with_dynex_clora(
     batch_size=batch_size,
     alpha=alpha,
     model_saving_folder=model_saving_folder,
-    model_name=model_name,
+    model_name="dynex_period3",
     stop_signal_file=stop_signal_file,
     scheduler=None,
     period=period,
     stable_classes=stable_classes,
+    similarity_threshold=similarity_threshold,
     class_features_dict=class_features_dict,
     related_labels=related_labels,
-    similarity_threshold=similarity_threshold
+    device=device
 )
 
-del X_train, y_train, X_val, y_val, teacher_model, student_model
-gc.collect()
-torch.cuda.empty_cache()
 
-
-# === Period 4 Training ===
+# Period 4
 period = 4
-device = auto_select_cuda_device()
 X_train, y_train = period_datasets[period]["train"]
 X_val, y_val     = period_datasets[period]["test"]
-input_size       = X_train.shape[1]
-output_size      = len(set(y_train))
-stable_classes   = [0, 1, 3]
+
+device = auto_select_cuda_device()
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
+stable_classes = [0, 1, 3]
+
+model_saving_folder = "path/to/your/period4_model_folder"
+ensure_folder(model_saving_folder)
 
 prev_folder = "path/to/your/period3_folder"
-model_saving_folder = "path/to/your/period4_folder"
-os.makedirs(model_saving_folder, exist_ok=True)
-
-# === Load class features ===
 class_features_path = os.path.join(prev_folder, "class_features.pkl")
-with open(class_features_path, 'rb') as f:
+with open(class_features_path, "rb") as f:
     class_features_dict = pickle.load(f)
 
-# === Load teacher model ===
-teacher_model = HAR_MLP_LoRA_v2(
-    input_size=input_size,
-    hidden_size=hidden_size,
-    output_size=output_size - 2,  # Period 4 add WALKING_UPSTAIRS and WALKING_DOWNSTAIRS
-    dropout=dropout,
-    lora_rank=lora_r
-).to(device)
+teacher_ckpt = torch.load(os.path.join(prev_folder, "dynex_period3_best.pth"), map_location=device)
+num_adapters = teacher_ckpt.get("num_lora_adapters", 0)
+related_labels = teacher_ckpt.get("related_labels", {"fc2": [0, 1]})
 
-checkpoint_path = os.path.join(prev_folder, f"{model_name}_best.pth")
-checkpoint = torch.load(checkpoint_path, map_location=device)
-num_lora_adapters = checkpoint.get("num_lora_adapters", 0)
-related_labels = checkpoint.get("related_labels", {})
-
-for _ in range(num_lora_adapters):
+teacher_model = HAR_MLP_LoRA_v2(input_size, hidden_size, output_size - 2, dropout, lora_rank=lora_r).to(device)
+for _ in range(num_adapters):
     teacher_model.add_lora_adapter()
-teacher_model.load_state_dict(checkpoint["model_state_dict"])
+teacher_model.load_state_dict(teacher_ckpt["model_state_dict"])
 
-# === Initialize student model ===
-student_model = HAR_MLP_LoRA_v2(
-    input_size=input_size,
-    hidden_size=hidden_size,
-    output_size=output_size,
-    dropout=dropout,
-    lora_rank=lora_r
-).to(device)
+model = HAR_MLP_LoRA_v2(input_size, hidden_size, output_size, dropout, lora_rank=lora_r).to(device)
+for _ in range(num_adapters):
+    model.add_lora_adapter()
+model.load_state_dict({
+    k: v for k, v in teacher_model.state_dict().items()
+    if not k.startswith("fc3")
+}, strict=False)
 
-for _ in range(num_lora_adapters):
-    student_model.add_lora_adapter()
-
-teacher_dict = teacher_model.state_dict()
-student_dict = student_model.state_dict()
-for name in student_dict:
-    if name in teacher_dict and student_dict[name].shape == teacher_dict[name].shape and not name.startswith("fc3"):
-        student_dict[name].copy_(teacher_dict[name])
-student_model.load_state_dict(student_dict)
-
-# === Optimizer, Loss, Scheduler ===
 criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(student_model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-scheduler = None
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
-# === Training ===
 train_with_dynex_clora(
-    model=student_model,
+    model=model,
     teacher_model=teacher_model,
     output_size=output_size,
     criterion=criterion,
@@ -772,17 +701,13 @@ train_with_dynex_clora(
     batch_size=batch_size,
     alpha=alpha,
     model_saving_folder=model_saving_folder,
-    model_name=model_name,
+    model_name="dynex_period4",
     stop_signal_file=stop_signal_file,
-    scheduler=scheduler,
+    scheduler=None,
     period=period,
     stable_classes=stable_classes,
+    similarity_threshold=similarity_threshold,
     class_features_dict=class_features_dict,
     related_labels=related_labels,
-    similarity_threshold=similarity_threshold
+    device=device
 )
-
-# === Cleanup ===
-del X_train, y_train, X_val, y_val, teacher_model, student_model
-gc.collect()
-torch.cuda.empty_cache()

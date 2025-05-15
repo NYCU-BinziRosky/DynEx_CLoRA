@@ -38,19 +38,16 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-# === Set working directory manually if needed ===
-# (This should point to your own project directory)
+# Set working directory
 Working_directory = os.path.normpath("path/to/your/project")
 os.chdir(Working_directory)
 
-# === GPU device selection (auto detect least memory usage) ===
+# CUDA device auto-selection
 def auto_select_cuda_device(verbose=True):
-    """
-    Automatically selects the CUDA GPU with the least memory usage.
-    Falls back to CPU if no GPU is available.
-    """
+    """Automatically select the least-used CUDA device, or fallback to CPU."""
     if not torch.cuda.is_available():
-        print("🚫 No CUDA GPU available. Using CPU.")
+        if verbose:
+            print("⚠️ No CUDA device available. Using CPU.")
         return torch.device("cpu")
 
     try:
@@ -60,20 +57,18 @@ def auto_select_cuda_device(verbose=True):
         )
         memory_used = [int(x) for x in smi_output.strip().split('\n')]
         best_gpu = int(np.argmin(memory_used))
-
         if verbose:
-            print("🎯 Automatically selected GPU:")
-            print(f"    - CUDA Device ID : {best_gpu}")
-            print(f"    - Memory Used    : {memory_used[best_gpu]} MiB")
-            print(f"    - Device Name    : {torch.cuda.get_device_name(best_gpu)}")
+            print(f"🎯 Auto-selected GPU: {best_gpu} ({memory_used[best_gpu]} MiB used)")
         return torch.device(f"cuda:{best_gpu}")
     except Exception as e:
-        print(f"⚠️ Failed to auto-detect GPU. Falling back to cuda:0. ({e})")
+        if verbose:
+            print(f"⚠️ GPU detection failed. Falling back to cuda:0 ({e})")
         return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-# === Device assignment ===
+# Device assignment
 device = auto_select_cuda_device()
 
+# Utility functions
 def ensure_folder(folder_path: str) -> None:
     """Ensure the given folder exists, create it if not."""
     os.makedirs(folder_path, exist_ok=True)
@@ -735,37 +730,6 @@ def print_class_distribution(y, var_name: str) -> None:
     ]
     print(header.ljust(40) + " || ".join(line_parts))
 
-ticker = 'BTC-USD'
-downsampled_data_minutes = 1  # No downsampling (1-minute interval retained)
-
-# === Trend Detection Parameters (for 1,000-point sequences) ===
-lower_threshold = 0.0009  # Lower threshold: even small price movements may be considered trends
-upper_threshold = 0.015   # Upper threshold: only stronger movements are marked as strong trends
-reverse_steps = 13        # Minimum number of consecutive reversals to confirm a trend change
-
-# === Features to exclude from log return and trend calculation ===
-exclude_columns = ['MACD', 'MACD_signal', 'ROC_10', 'OBV', 'AD_Line']
-
-# === Feature Selection by Correlation with 'trend' column ===
-# Strongly correlated (correlation > 0.6): Keep
-strongly_correlated = ['close', 'open', 'SMA_5', 'high', 'low', 'EMA_10', 'SMA_10']
-
-# Moderately correlated (correlation between 0.3 and 0.6): Exclude
-moderately_correlated = ['BB_middle', 'BB_lower', 'BB_upper', 'RSI_14']
-
-# Weakly or uncorrelated (correlation <~ 0.3): Exclude
-weakly_correlated = ['SMA_50', 'volume', 'BBW', 'ATR_14']
-
-# Extend the exclude list to include all weakly and moderately correlated features
-exclude_columns += weakly_correlated + moderately_correlated
-
-# === Sequence Generation Parameters ===
-sequence_length = 1000       # Window size for each time-series sample
-sliding_interval = 60        # Stride between two consecutive sequences
-
-
-# === Model Utility Functions ===
-
 def print_model_info(model):
     """
     Print total number of parameters and estimated model size in MB (float32).
@@ -776,9 +740,6 @@ def print_model_info(model):
 
     print(f"🧠 Total Parameters        : {total_params}")
     print(f"📦 Model Size (float32)   : {param_size_MB:.2f} MB")
-
-
-# === Forward Transfer (FWT) Computation ===
 
 def compute_fwt_fixed_verbose(previous_model, init_model, X_val, y_val, known_classes, batch_size=64):
     """
@@ -852,36 +813,42 @@ def compute_fwt_fixed_verbose(previous_model, init_model, X_val, y_val, known_cl
 
     return fwt_value, acc_prev, acc_init
 
-
-# === Per-Class Accuracy Tracker ===
-
 def compute_classwise_accuracy(student_logits_flat, y_batch, class_correct, class_total):
     """
-    Compute and accumulate per-class accuracy stats using flat prediction and label tensors.
-
+    Computes per-class accuracy by accumulating correct and total samples for each class using vectorized operations.
+    
     Args:
-        student_logits_flat (Tensor): Logits, shape [B * L, num_classes].
-        y_batch (Tensor): Ground truth, shape [B * L].
-        class_correct (dict): Dict to accumulate correct predictions per class.
-        class_total (dict): Dict to accumulate total samples per class.
+        student_logits_flat (torch.Tensor): Model predictions (logits) in shape [batch_size * seq_len, output_size]
+        y_batch (torch.Tensor): True labels in shape [batch_size * seq_len]
+        class_correct (dict): Dictionary to store correct predictions per class
+        class_total (dict): Dictionary to store total samples per class
     """
+    # Ensure inputs are on the same device
     if student_logits_flat.device != y_batch.device:
         raise ValueError("student_logits_flat and y_batch must be on the same device")
 
-    predictions = torch.argmax(student_logits_flat, dim=-1)
-    correct_mask = (predictions == y_batch)
+    # Convert logits to predicted class indices
+    predictions = torch.argmax(student_logits_flat, dim=-1)  # Shape: [batch_size * seq_len]
+
+    # Compute correct predictions mask
+    correct_mask = (predictions == y_batch)  # Shape: [batch_size * seq_len], boolean
+
+    # Get unique labels in this batch
     unique_labels = torch.unique(y_batch)
 
+    # Update class_total and class_correct using vectorized operations
     for label in unique_labels:
-        label = label.item()
+        label = label.item()  # Convert tensor to scalar
         if label not in class_total:
             class_total[label] = 0
             class_correct[label] = 0
-
+        
+        # Count total samples for this label
         label_mask = (y_batch == label)
         class_total[label] += label_mask.sum().item()
+        
+        # Count correct predictions for this label
         class_correct[label] += (label_mask & correct_mask).sum().item()
-
 
 def setup_file_paths(pair='BTCUSD', base_dir='Data', days=190):
     """
@@ -960,6 +927,7 @@ if __name__ == "__main__":
     # Print folder contents
     print_folder_contents(base_folder_path)
 
+
 def check_gpu_config():
     """
     Check GPU availability and display detailed configuration information.
@@ -1037,7 +1005,37 @@ def print_torch_config():
 if __name__ == "__main__":
     print_torch_config()
 
+# Configuration Parameters
+ticker = 'BTC-USD'
+downsampled_data_minutes = 1  # No downsampling (1-minute interval retained)
 
+# === Trend Detection Parameters (for 1,000-point sequences) ===
+lower_threshold = 0.0009  # Lower threshold: even small price movements may be considered trends
+upper_threshold = 0.015   # Upper threshold: only stronger movements are marked as strong trends
+reverse_steps = 13        # Minimum number of consecutive reversals to confirm a trend change
+
+# === Features to exclude from log return and trend calculation ===
+exclude_columns = ['MACD', 'MACD_signal', 'ROC_10', 'OBV', 'AD_Line']
+
+# === Feature Selection by Correlation with 'trend' column ===
+# Strongly correlated (correlation > 0.6): Keep
+strongly_correlated = ['close', 'open', 'SMA_5', 'high', 'low', 'EMA_10', 'SMA_10']
+
+# Moderately correlated (correlation between 0.3 and 0.6): Exclude
+moderately_correlated = ['BB_middle', 'BB_lower', 'BB_upper', 'RSI_14']
+
+# Weakly or uncorrelated (correlation <~ 0.3): Exclude
+weakly_correlated = ['SMA_50', 'volume', 'BBW', 'ATR_14']
+
+# Extend the exclude list to include all weakly and moderately correlated features
+exclude_columns += weakly_correlated + moderately_correlated
+
+# === Sequence Generation Parameters ===
+sequence_length = 1000       # Window size for each time-series sample
+sliding_interval = 60        # Stride between two consecutive sequences
+
+
+# Model
 class LoRA(nn.Module):
     def __init__(self, linear_layer: nn.Linear, rank: int):
         """
@@ -1048,7 +1046,7 @@ class LoRA(nn.Module):
             rank (int): The rank of the LoRA adjustment matrices (e.g., 8).
         """
         super(LoRA, self).__init__()
-        self.linear = linear_layer  # 保留對 linear_layer 的引用
+        self.linear = linear_layer
         self.rank = rank
         
         # Get input and output dimensions from the linear layer
@@ -1185,7 +1183,7 @@ class BiGRUWithAttention_LoRA(nn.Module):
 
         return trainable_params
 
-
+# Training Function
 def train_lora_baseline(model, output_size, criterion, optimizer,
                         X_train, y_train, X_val, y_val, scheduler=None,
                         num_epochs=10, batch_size=64, model_saving_folder=None,
@@ -1311,10 +1309,12 @@ def train_lora_baseline(model, output_size, criterion, optimizer,
     gc.collect()
 
 
-# === Load data for Period 1 ===
+device = auto_select_cuda_device()
+
+# Period 1
 with contextlib.redirect_stdout(open(os.devnull, 'w')):
     X_train, y_train, X_val, y_val, X_test, y_test, Number_features = process_and_return_splits(
-        with_indicators_file_path = list_period_files_full_path[0],
+        with_indicators_file_path = "path/to/your/period1_file.csv",
         downsampled_data_minutes = downsampled_data_minutes,
         exclude_columns = exclude_columns,
         lower_threshold = lower_threshold,
@@ -1325,7 +1325,6 @@ with contextlib.redirect_stdout(open(os.devnull, 'w')):
         trends_to_keep = {0, 1}
     )
 
-# === Basic Setup ===
 input_size = Number_features
 hidden_size = 64
 output_size = len(np.unique(y_val))
@@ -1334,13 +1333,11 @@ dropout = 0.0
 lora_r = 4
 num_epochs = 1000
 batch_size = 64
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 stop_signal_file = "path/to/your/stop_signal.txt"
 model_saving_folder = "path/to/your/period1_folder"
 ensure_folder(model_saving_folder)
 
-# === Initialize model (no LoRA for Period 1) ===
 model = BiGRUWithAttention_LoRA(input_size, hidden_size, output_size, num_layers, dropout, lora_r).to(device)
 
 criterion = nn.CrossEntropyLoss()
@@ -1349,18 +1346,24 @@ scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.9, p
 
 # === Train ===
 train_lora_baseline(
-    model, output_size, criterion, optimizer,
-    X_train, y_train, X_val, y_val,
-    scheduler, num_epochs, batch_size,
-    model_saving_folder, "BiGRUWithAttention", stop_signal_file
+    model=model,
+    output_size=output_size,
+    criterion=criterion,
+    optimizer=optimizer,
+    X_train=X_train, y_train=y_train,
+    X_val=X_val, y_val=y_val,
+    scheduler=scheduler,
+    num_epochs=num_epochs,
+    batch_size=batch_size,
+    model_saving_folder=model_saving_folder,
+    model_name='BiGRUWithAttention',
+    stop_signal_file=stop_signal_file
 )
 
-
-
-# === Load data for Period 2 ===
+# Period 2
 with contextlib.redirect_stdout(open(os.devnull, 'w')):
     X_train, y_train, X_val, y_val, X_test, y_test, Number_features = process_and_return_splits(
-        with_indicators_file_path = list_period_files_full_path[1],
+        with_indicators_file_path = "path/to/your/period2_file.csv",
         downsampled_data_minutes = downsampled_data_minutes,
         exclude_columns = exclude_columns,
         lower_threshold = lower_threshold,
@@ -1371,7 +1374,6 @@ with contextlib.redirect_stdout(open(os.devnull, 'w')):
         trends_to_keep = {0, 1, 2}
     )
 
-# === Model Setup ===
 input_size = Number_features
 hidden_size = 64
 output_size = len(np.unique(y_val))
@@ -1380,23 +1382,19 @@ dropout = 0.0
 lora_r = 4
 num_epochs = 1000
 batch_size = 64
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 stop_signal_file = "path/to/your/stop_signal.txt"
 model_saving_folder = "path/to/your/period2_folder"
 ensure_folder(model_saving_folder)
 
-# === Load previous weights (Period 1) ===
 prev_path = "path/to/your/period1_folder/BiGRUWithAttention_best.pth"
 checkpoint = torch.load(prev_path, map_location=device)
 prev_state = checkpoint["model_state_dict"]
 
-# === Initialize model and load weights (before LoRA is set) ===
 model = BiGRUWithAttention_LoRA(input_size, hidden_size, output_size, num_layers, dropout, lora_r).to(device)
 model.load_state_dict({k: v for k, v in prev_state.items() if not k.startswith("fc.") and not k.startswith("lora_adapter.")}, strict=False)
 model.init_lora()
 
-# === Optionally load previous LoRA adapter ===
 if any(k.startswith("lora_adapter.") for k in prev_state.keys()):
     model.lora_adapter.load_state_dict({k.replace("lora_adapter.", ""): v for k, v in prev_state.items() if k.startswith("lora_adapter.")})
 
@@ -1405,17 +1403,24 @@ optimizer = optim.Adam(model.get_trainable_parameters(), lr=0.0001)
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.9, patience=10)
 
 train_lora_baseline(
-    model, output_size, criterion, optimizer,
-    X_train, y_train, X_val, y_val,
-    scheduler, num_epochs, batch_size,
-    model_saving_folder, "BiGRUWithAttention", stop_signal_file
+    model=model,
+    output_size=output_size,
+    criterion=criterion,
+    optimizer=optimizer,
+    X_train=X_train, y_train=y_train,
+    X_val=X_val, y_val=y_val,
+    scheduler=scheduler,
+    num_epochs=num_epochs,
+    batch_size=batch_size,
+    model_saving_folder=model_saving_folder,
+    model_name='BiGRUWithAttention',
+    stop_signal_file=stop_signal_file
 )
 
-
-# === Load data for Period 3 ===
+# Period 3
 with contextlib.redirect_stdout(open(os.devnull, 'w')):
     X_train, y_train, X_val, y_val, X_test, y_test, Number_features = process_and_return_splits(
-        with_indicators_file_path = list_period_files_full_path[2],
+        with_indicators_file_path = "path/to/your/period3_file.csv",
         downsampled_data_minutes = downsampled_data_minutes,
         exclude_columns = exclude_columns,
         lower_threshold = lower_threshold,
@@ -1426,7 +1431,6 @@ with contextlib.redirect_stdout(open(os.devnull, 'w')):
         trends_to_keep = {0, 1, 2, 3}
     )
 
-# === Setup ===
 input_size = Number_features
 hidden_size = 64
 output_size = len(np.unique(y_val))
@@ -1435,7 +1439,6 @@ dropout = 0.0
 lora_r = 4
 num_epochs = 1000
 batch_size = 64
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 stop_signal_file = "path/to/your/stop_signal.txt"
 model_saving_folder = "path/to/your/period3_folder"
@@ -1445,7 +1448,6 @@ prev_path = "path/to/your/period2_folder/BiGRUWithAttention_best.pth"
 checkpoint = torch.load(prev_path, map_location=device)
 prev_state = checkpoint["model_state_dict"]
 
-# === Model and LoRA ===
 model = BiGRUWithAttention_LoRA(input_size, hidden_size, output_size, num_layers, dropout, lora_r).to(device)
 model.init_lora()
 model.load_state_dict({k: v for k, v in prev_state.items() if not k.startswith("fc.")}, strict=False)
@@ -1455,14 +1457,21 @@ optimizer = optim.Adam(model.get_trainable_parameters(), lr=0.0001)
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.9, patience=10)
 
 train_lora_baseline(
-    model, output_size, criterion, optimizer,
-    X_train, y_train, X_val, y_val,
-    scheduler, num_epochs, batch_size,
-    model_saving_folder, "BiGRUWithAttention", stop_signal_file
+    model=model,
+    output_size=output_size,
+    criterion=criterion,
+    optimizer=optimizer,
+    X_train=X_train, y_train=y_train,
+    X_val=X_val, y_val=y_val,
+    scheduler=scheduler,
+    num_epochs=num_epochs,
+    batch_size=batch_size,
+    model_saving_folder=model_saving_folder,
+    model_name='BiGRUWithAttention',
+    stop_signal_file=stop_signal_file
 )
 
-
-# === Load data for Period 4 ===
+# Period 4
 with contextlib.redirect_stdout(open(os.devnull, 'w')):
     X_train, y_train, X_val, y_val, X_test, y_test, Number_features = process_and_return_splits(
         with_indicators_file_path = list_period_files_full_path[3],
@@ -1476,7 +1485,6 @@ with contextlib.redirect_stdout(open(os.devnull, 'w')):
         trends_to_keep = {0, 1, 2, 3, 4}
     )
 
-# === Setup ===
 input_size = Number_features
 hidden_size = 64
 output_size = len(np.unique(y_val))
@@ -1485,7 +1493,6 @@ dropout = 0.0
 lora_r = 4
 num_epochs = 1000
 batch_size = 64
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 stop_signal_file = "path/to/your/stop_signal.txt"
 model_saving_folder = "path/to/your/period4_folder"
@@ -1495,7 +1502,6 @@ prev_path = "path/to/your/period3_folder/BiGRUWithAttention_best.pth"
 checkpoint = torch.load(prev_path, map_location=device)
 prev_state = checkpoint["model_state_dict"]
 
-# === Model and LoRA ===
 model = BiGRUWithAttention_LoRA(input_size, hidden_size, output_size, num_layers, dropout, lora_r).to(device)
 model.init_lora()
 model.load_state_dict({k: v for k, v in prev_state.items() if not k.startswith("fc.")}, strict=False)
@@ -1505,8 +1511,16 @@ optimizer = optim.Adam(model.get_trainable_parameters(), lr=0.0001)
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.9, patience=10)
 
 train_lora_baseline(
-    model, output_size, criterion, optimizer,
-    X_train, y_train, X_val, y_val,
-    scheduler, num_epochs, batch_size,
-    model_saving_folder, "BiGRUWithAttention", stop_signal_file
+    model=model,
+    output_size=output_size,
+    criterion=criterion,
+    optimizer=optimizer,
+    X_train=X_train, y_train=y_train,
+    X_val=X_val, y_val=y_val,
+    scheduler=scheduler,
+    num_epochs=num_epochs,
+    batch_size=batch_size,
+    model_saving_folder=model_saving_folder,
+    model_name='BiGRUWithAttention',
+    stop_signal_file=stop_signal_file
 )

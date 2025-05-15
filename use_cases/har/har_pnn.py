@@ -114,6 +114,10 @@ for period in range(1, 5):
     print_class_distribution(yp_train, f"Period {period} (Train)", label_name_from_id)
     print_class_distribution(yp_test, f"Period {period} (Test)", label_name_from_id)
 
+def ensure_folder(folder_path: str) -> None:
+    """Create a folder if it does not exist."""
+    os.makedirs(folder_path, exist_ok=True)
+
 # CUDA device auto-selection
 def auto_select_cuda_device(verbose=True):
     """Automatically select the least-used CUDA device, or fallback to CPU."""
@@ -504,32 +508,32 @@ def train_with_pnn(
     gc.collect()
 
 
-# === Common Configuration ===
+# Common Configuration
 batch_size = 64
-stop_signal_file = "path/to/your/stop_signal_file.txt"
-model_name = "HAR_PNN_v2"
 num_epochs = 1000
 learning_rate = 0.0001
 weight_decay = 1e-5
 hidden_size = 128
 dropout = 0.2
+stop_signal_file = "path/to/your/stop_signal_file.txt"
 
-
-# === Period 1: Initial MLP (No PNN yet) ===
+# Period 1
 period = 1
-device = auto_select_cuda_device()
+
 X_train, y_train = period_datasets[period]["train"]
 X_val, y_val     = period_datasets[period]["test"]
-input_size       = X_train.shape[1]
-output_size      = len(set(y_train))
 
-model_saving_folder = "path/to/your/period1_folder"
-os.makedirs(model_saving_folder, exist_ok=True)
+device = auto_select_cuda_device()
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
 
 model = HAR_MLP_v2(input_size, hidden_size, output_size, dropout).to(device)
 criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
+model_saving_folder = "path/to/your/period1_model_folder"
+ensure_folder(model_saving_folder)
+
 train_with_pnn(
     model=model,
     output_size=output_size,
@@ -543,99 +547,42 @@ train_with_pnn(
     num_epochs=num_epochs,
     batch_size=batch_size,
     model_saving_folder=model_saving_folder,
-    model_name=model_name,
+    model_name="pnn_period1",
     stop_signal_file=stop_signal_file,
-    period=period,
     device=device
 )
 
-del X_train, y_train, X_val, y_val, model
-gc.collect()
-torch.cuda.empty_cache()
 
-
-# === Period 2: Add first column ===
+# Period 2
 period = 2
-device = auto_select_cuda_device()
+
 X_train, y_train = period_datasets[period]["train"]
 X_val, y_val     = period_datasets[period]["test"]
-input_size       = X_train.shape[1]
-output_size      = len(set(y_train))
-new_output_size  = 1  # One new class
 
-model_saving_folder = "path/to/your/period2_folder"
-os.makedirs(model_saving_folder, exist_ok=True)
-
-prev_model_path = "path/to/your/period1_folder/HAR_PNN_v2_best.pth"
-prev_model = HAR_MLP_v2(input_size, hidden_size, output_size - new_output_size, dropout)
-checkpoint = torch.load(prev_model_path, map_location=device)
-prev_model.load_state_dict(checkpoint['model_state_dict'])
-prev_model.to(device)
-prev_model.eval()
-for param in prev_model.parameters():
-    param.requires_grad = False
-
-new_column = HAR_PNN_Column_fc2(input_size, hidden_size, new_output_size)
-model = ProgressiveNeuralNetwork_fc2(base_model=prev_model, new_column=new_column).to(device)
-
-criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.new_column.parameters(), lr=learning_rate, weight_decay=weight_decay)
-
-train_with_pnn(
-    model=model,
-    output_size=output_size,
-    criterion=criterion,
-    optimizer=optimizer,
-    X_train=X_train,
-    y_train=y_train,
-    X_val=X_val,
-    y_val=y_val,
-    scheduler=None,
-    num_epochs=num_epochs,
-    batch_size=batch_size,
-    model_saving_folder=model_saving_folder,
-    model_name=model_name,
-    stop_signal_file=stop_signal_file,
-    period=period,
-    device=device
-)
-
-del X_train, y_train, X_val, y_val, model, prev_model, new_column, checkpoint
-gc.collect()
-torch.cuda.empty_cache()
-
-
-# === Period 3: Add second column ===
-period = 3
 device = auto_select_cuda_device()
-X_train, y_train = period_datasets[period]["train"]
-X_val, y_val     = period_datasets[period]["test"]
-input_size       = X_train.shape[1]
-output_size      = len(set(y_train))
-new_output_size  = 1
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
 
-model_saving_folder = "path/to/your/period3_folder"
-os.makedirs(model_saving_folder, exist_ok=True)
-
-# Rebuild previous model with base + column
-base_model = HAR_MLP_v2(input_size, hidden_size, output_size - 2, dropout)
-prev_column = HAR_PNN_Column_fc2(input_size, hidden_size, new_output_size=1)
-frozen_model = ProgressiveNeuralNetwork_fc2(base_model=base_model, new_column=prev_column)
-
-prev_model_path = "path/to/your/period2_folder/HAR_PNN_v2_best.pth"
+# === Freeze Period 1 ===
+prev_model_path = "path/to/your/period1_best.pth"
+frozen_model = HAR_MLP_v2(input_size, hidden_size, output_size - 1, dropout)
 checkpoint = torch.load(prev_model_path, map_location=device)
-frozen_model.load_state_dict(checkpoint['model_state_dict'])
+frozen_model.load_state_dict(checkpoint["model_state_dict"])
 frozen_model.to(device)
 frozen_model.eval()
-for param in frozen_model.parameters():
-    param.requires_grad = False
+for p in frozen_model.parameters():
+    p.requires_grad = False
 
-new_column = HAR_PNN_Column_fc2(input_size, hidden_size, new_output_size)
+# === New Column ===
+new_column = HAR_PNN_Column_fc2(input_size, hidden_size, new_output_size=1)
 model = ProgressiveNeuralNetwork_fc2(base_model=frozen_model, new_column=new_column).to(device)
 
 criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.new_column.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
+model_saving_folder = "path/to/your/period2_model_folder"
+ensure_folder(model_saving_folder)
+
 train_with_pnn(
     model=model,
     output_size=output_size,
@@ -649,51 +596,44 @@ train_with_pnn(
     num_epochs=num_epochs,
     batch_size=batch_size,
     model_saving_folder=model_saving_folder,
-    model_name=model_name,
+    model_name="pnn_period2",
     stop_signal_file=stop_signal_file,
-    period=period,
     device=device
 )
 
-del X_train, y_train, X_val, y_val, model
-del base_model, prev_column, new_column, frozen_model, checkpoint
-gc.collect()
-torch.cuda.empty_cache()
 
+# Period 3
+period = 3
 
-# === Period 4: Add third column (2 new classes) ===
-period = 4
-device = auto_select_cuda_device()
 X_train, y_train = period_datasets[period]["train"]
 X_val, y_val     = period_datasets[period]["test"]
-input_size       = X_train.shape[1]
-output_size      = len(set(y_train))
-new_output_size  = 2
 
-model_saving_folder = "path/to/your/period4_folder"
-os.makedirs(model_saving_folder, exist_ok=True)
+device = auto_select_cuda_device()
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
 
-# Reconstruct all prior structure: base + col2 + col3
-base_model = HAR_MLP_v2(input_size, hidden_size, 2, dropout)
-col2 = HAR_PNN_Column_fc2(input_size, hidden_size, 1)
-step1 = ProgressiveNeuralNetwork_fc2(base_model=base_model, new_column=col2)
-col3 = HAR_PNN_Column_fc2(input_size, hidden_size, 1)
-step2 = ProgressiveNeuralNetwork_fc2(base_model=step1, new_column=col3)
+# === Restore Period 2 ===
+base_model = HAR_MLP_v2(input_size, hidden_size, output_size - 2, dropout)
+prev_column = HAR_PNN_Column_fc2(input_size, hidden_size, 1)
+frozen_model = ProgressiveNeuralNetwork_fc2(base_model, prev_column)
 
-prev_model_path = "path/to/your/period3_folder/HAR_PNN_v2_best.pth"
-checkpoint = torch.load(prev_model_path, map_location=device)
-step2.load_state_dict(checkpoint['model_state_dict'])
-step2.to(device)
-step2.eval()
-for param in step2.parameters():
-    param.requires_grad = False
+checkpoint = torch.load("path/to/your/period2_best.pth", map_location=device)
+frozen_model.load_state_dict(checkpoint["model_state_dict"])
+frozen_model.to(device)
+frozen_model.eval()
+for p in frozen_model.parameters():
+    p.requires_grad = False
 
-new_column = HAR_PNN_Column_fc2(input_size, hidden_size, new_output_size)
-model = ProgressiveNeuralNetwork_fc2(base_model=step2, new_column=new_column).to(device)
+# === Add new column ===
+new_column = HAR_PNN_Column_fc2(input_size, hidden_size, 1)
+model = ProgressiveNeuralNetwork_fc2(base_model=frozen_model, new_column=new_column).to(device)
 
 criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.new_column.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
+model_saving_folder = "path/to/your/period3_model_folder"
+ensure_folder(model_saving_folder)
+
 train_with_pnn(
     model=model,
     output_size=output_size,
@@ -707,13 +647,61 @@ train_with_pnn(
     num_epochs=num_epochs,
     batch_size=batch_size,
     model_saving_folder=model_saving_folder,
-    model_name=model_name,
+    model_name="pnn_period3",
     stop_signal_file=stop_signal_file,
-    period=period,
     device=device
 )
 
-del X_train, y_train, X_val, y_val, model
-del base_model, col2, col3, new_column, step1, step2, checkpoint
-gc.collect()
-torch.cuda.empty_cache()
+
+# Period 4
+period = 4
+
+X_train, y_train = period_datasets[period]["train"]
+X_val, y_val     = period_datasets[period]["test"]
+
+device = auto_select_cuda_device()
+input_size = X_train.shape[1]
+output_size = len(set(y_train))
+
+# === Rebuild frozen Period 3 model ===
+base_model = HAR_MLP_v2(input_size, hidden_size, 2, dropout)
+column_2 = HAR_PNN_Column_fc2(input_size, hidden_size, 1)
+step1 = ProgressiveNeuralNetwork_fc2(base_model, column_2)
+
+column_3 = HAR_PNN_Column_fc2(input_size, hidden_size, 1)
+step2 = ProgressiveNeuralNetwork_fc2(step1, column_3)
+
+checkpoint = torch.load("path/to/your/period3_best.pth", map_location=device)
+step2.load_state_dict(checkpoint["model_state_dict"])
+step2.to(device)
+step2.eval()
+for p in step2.parameters():
+    p.requires_grad = False
+
+# === Add new column for Period 4 ===
+column_4 = HAR_PNN_Column_fc2(input_size, hidden_size, new_output_size=2)
+model = ProgressiveNeuralNetwork_fc2(base_model=step2, new_column=column_4).to(device)
+
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.new_column.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+model_saving_folder = "path/to/your/period4_model_folder"
+ensure_folder(model_saving_folder)
+
+train_with_pnn(
+    model=model,
+    output_size=output_size,
+    criterion=criterion,
+    optimizer=optimizer,
+    X_train=X_train,
+    y_train=y_train,
+    X_val=X_val,
+    y_val=y_val,
+    scheduler=None,
+    num_epochs=num_epochs,
+    batch_size=batch_size,
+    model_saving_folder=model_saving_folder,
+    model_name="pnn_period4",
+    stop_signal_file=stop_signal_file,
+    device=device
+)
